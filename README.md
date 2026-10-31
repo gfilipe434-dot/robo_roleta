@@ -69,7 +69,7 @@ Na banca, o robô dá **uma entrada por rodada**: padrões que apontam o mesmo a
 - **Leitura ao vivo do Bac Bo:** lê o quadro de bolinhas da mesa pelo `data-type="roadItemColor"` do SVG, ordena pela posição na tela (coluna por coluna) e entende quando o quadro enche e a coluna mais antiga sai.
 - **Padrões do Bac Bo configuráveis:** liga e desliga os prontos e cadastra os seus em texto simples; ficam salvos no computador.
 - **Uma entrada por rodada:** sinais no mesmo alvo se juntam; sinais que discordam seguem a regra escolhida (vale o mais longo, ou não entra).
-- **No computador, painel enxuto:** só o jogo e a banca; o valor da entrada é calculado sozinho (1% da banca por alvo) e o botão **Salvar sessão** baixa a planilha das entradas.
+- **No computador, painel enxuto:** só o jogo, a banca, o valor da entrada e o da proteção (com sugestão de 1% da banca por alvo) e o botão **Salvar sessão** baixa a planilha das entradas.
 - **Leitura ao vivo robusta:** acha a faixa de resultados pelo atributo `data-role="number-N"` (inclusive em iframes aninhados e shadow DOM), confirma cada mudança com duas leituras, recupera giros perdidos e reencontra a faixa se a página recarregar.
 - **Modo terminal completo**, com menu, para quem prefere rodar sem navegador.
 - **Testes de aceitação reproduzíveis:** `--backtest 1000000 --semente 42` sempre dá 195.368 sinais e −R$ 90.804,00 na roleta; `--jogo bacbo --backtest 1000000 --semente 42` sempre dá 515.257 entradas e −R$ 105.951,00 no Bac Bo.

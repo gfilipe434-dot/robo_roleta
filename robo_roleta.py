@@ -2276,6 +2276,8 @@ class LeitorProcesso:
             self.proc.terminate()
 
 
+URL_MESA_PADRAO = {"roleta": "https://oibet05.bar/game/immersive-roulette-by-evolution",
+                   "bacbo": "https://oibet05.bar/game/bac-bo-by-evolution"}
 CONFIG_PAINEL_PADRAO = {"url": "", "escondido": False, "auto_confirmar": True, "iniciar_sozinho": False,
                         "bacbo_padroes_desligados": [], "bacbo_padroes_extras": "",
                         "bacbo_url": "", "bacbo_escondido": False, "bacbo_auto_confirmar": True,
@@ -2709,7 +2711,7 @@ def app_web() -> None:
     @st.cache_resource
     def obter_sessao() -> SessaoWeb:
         sessao = SessaoWeb()
-        sessao.nova_sessao(config_pela_banca(_banca_salva("roleta"), bacbo=False))  # banca que você deixou salva
+        sessao.nova_sessao(_config_salva("roleta"))  # banca e entrada que você deixou salvas
         return sessao
 
     if no_meu_pc:
@@ -2913,7 +2915,8 @@ def _controles_auto(st, sessao, tem_playwright: bool, bacbo: bool = False) -> No
     cfg = ler_config_painel()
     exemplo = "bac-bo-by-evolution" if bacbo else "immersive-roulette-by-evolution"
     c1, c2 = st.columns([3, 2])
-    url = c1.text_input("Endereço da mesa", value=cfg[c_ + "url"], key=f"{k}_url",
+    url = c1.text_input("Endereço da mesa", value=cfg[c_ + "url"] or URL_MESA_PADRAO["bacbo" if bacbo else "roleta"],
+                        key=f"{k}_url",
                         placeholder=f"ex.: https://site-do-cassino/game/{exemplo}")
     janela = c2.radio("Chrome do robô", ["Escondido (sem janela)", "Visível (para fazer login)"],
                       index=0 if cfg[c_ + "escondido"] else 1, key=f"{k}_janela")
@@ -3846,27 +3849,55 @@ def _banca_salva(jogo: str) -> float:
     return valor if valor >= 10 else 1000.0
 
 
-def _banca_lateral(st, alvo, bacbo: bool):
-    """Campo da banca + botão Entrar. Devolve a configuração calculada para essa banca."""
-    jogo = "bacbo" if bacbo else "roleta"
-    st.markdown('<div class="rr-sub" style="margin-top:10px">Sua banca</div>', unsafe_allow_html=True)
-    valor = st.number_input("Valor da banca (R$)", min_value=10.0, max_value=10_000_000.0,
-                            value=float(alvo.config.banca_inicial), step=10.0, key=f"rr_banca_{jogo}")
-    config = config_pela_banca(float(valor), bacbo)
+def _config_salva(jogo: str):
+    """Banca, entrada e proteção que você deixou salvas (sem entrada salva, usa 1% da banca)."""
+    bacbo = jogo == "bacbo"
+    config = config_pela_banca(_banca_salva(jogo), bacbo)
+    salvo = ler_config_painel()
+    try:
+        entrada = float(salvo[f"entrada_{jogo}"])
+        protecao = float(salvo[f"protecao_{jogo}"])
+    except (KeyError, TypeError, ValueError):
+        return config
+    if entrada < 1 or protecao < 0:
+        return config
+    return _montar_config(config.banca_inicial, entrada, protecao, bacbo)
+
+
+def _montar_config(banca: float, entrada: float, protecao: float, bacbo: bool):
     if bacbo:
-        st.caption(f"Entrada: {formatar_reais(config.valor_por_alvo)} por sinal + "
-                   f"{formatar_reais(config.valor_protecao_empate)} no empate")
-    else:
-        st.caption(f"Entrada: {formatar_reais(config.valor_por_alvo)} em cada alvo + "
-                   f"{formatar_reais(config.valor_protecao_zero)} no zero")
+        return ConfigBacBo(valor_por_alvo=entrada, protecao_empate=protecao > 0,
+                           valor_protecao_empate=protecao, banca_inicial=banca)
+    return Config(valor_por_alvo=entrada, protecao_zero=protecao > 0, valor_protecao_zero=protecao, banca_inicial=banca)
+
+
+def _banca_lateral(st, alvo, bacbo: bool):
+    """Banca, valor da entrada e da proteção + botão Entrar. Devolve a configuração da tela."""
+    jogo = "bacbo" if bacbo else "roleta"
+    atual = alvo.config
+    protecao_atual = atual.valor_protecao_empate if bacbo else atual.valor_protecao_zero
+    st.markdown('<div class="rr-sub" style="margin-top:10px">Sua banca</div>', unsafe_allow_html=True)
+    banca = st.number_input("Valor da banca (R$)", min_value=10.0, max_value=10_000_000.0,
+                            value=float(atual.banca_inicial), step=10.0, key=f"rr_banca_{jogo}")
+    entrada = st.number_input("Valor da entrada (R$)" if bacbo else "Valor da entrada, em cada alvo (R$)",
+                              min_value=1.0, max_value=100_000.0, value=float(atual.valor_por_alvo), step=1.0,
+                              key=f"rr_entrada_{jogo}")
+    protecao = st.number_input("Valor no empate (R$)" if bacbo else "Valor no zero (R$)", min_value=0.0,
+                               max_value=100_000.0, value=float(protecao_atual), step=0.5, key=f"rr_protecao_{jogo}")
+    sugestao = config_pela_banca(float(banca), bacbo)
+    sug_protecao = sugestao.valor_protecao_empate if bacbo else sugestao.valor_protecao_zero
+    st.caption(f"Sugestão para essa banca (1% por alvo): {formatar_reais(sugestao.valor_por_alvo)} + "
+               f"{formatar_reais(sug_protecao)} {'no empate' if bacbo else 'no zero'}. Valor 0 = sem proteção.")
+    config = _montar_config(float(banca), float(entrada), float(protecao), bacbo)
     campos = ("valor_por_alvo", "banca_inicial") + (("valor_protecao_empate",) if bacbo else ("valor_protecao_zero",))
-    mudou = any(getattr(alvo.config, c) != getattr(config, c) for c in campos)
+    mudou = any(getattr(atual, c) != getattr(config, c) for c in campos)
     if st.button("Entrar", key="rr_entrar", type="primary" if mudou else "secondary"):
         alvo.nova_sessao(config)
-        salvar_config_painel({f"banca_{jogo}": float(valor)})
+        salvar_config_painel({f"banca_{jogo}": float(banca), f"entrada_{jogo}": float(entrada),
+                              f"protecao_{jogo}": float(protecao)})
         mudou = False
     if mudou:
-        st.caption("Clique em Entrar para começar com essa banca.")
+        st.caption("Clique em Entrar para começar com esses valores.")
     return config
 
 
@@ -3937,7 +3968,7 @@ class SessaoBacBo:
         self.padroes: List[PadraoBacBo] = self._montar_padroes()
         regra = salvo.get("bacbo_regra")
         self.regra: str = regra if regra in NOMES_REGRA else REGRA_PADRAO
-        self.config = config_pela_banca(_banca_salva("bacbo"), bacbo=True) if no_meu_pc else ConfigBacBo()
+        self.config = _config_salva("bacbo") if no_meu_pc else ConfigBacBo()
         self.motor = MotorBacBo(self.config, self.padroes, regra=self.regra)
         self.sim = {"rodando": False, "dados": None, "rng": None, "proximo": 0.0, "rapido": False}
         self.backtest: Optional[dict] = None
