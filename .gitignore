@@ -1,0 +1,6 @@
+# arquivos que o robô cria no seu PC e não devem ir para o GitHub
+perfil_navegador_robo/
+painel_robo.log
+painel_robo.porta
+__pycache__/
+*.pyc
