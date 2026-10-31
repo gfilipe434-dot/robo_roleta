@@ -62,9 +62,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import html
 import importlib.util
+import io
 import json
+import math
 import os
 import queue
 import random
@@ -1994,7 +1997,7 @@ def criar_atalho_area_de_trabalho() -> None:
 class MotorWeb:
     """Mesmo ciclo do MonitorRoleta (coleta -> histórico -> liquida -> analisa), sem imprimir."""
 
-    LIMITE_FEED = 300      # quantos resultados recentes guardar para a tela
+    LIMITE_FEED = 5000     # quantos resultados guardar (tela e botão Salvar sessão)
     LIMITE_CURVA = 3000    # pontos máximos da curva da sessão
 
     def __init__(self, config: Config, registrar: bool = True) -> None:
@@ -2275,7 +2278,8 @@ class LeitorProcesso:
 
 CONFIG_PAINEL_PADRAO = {"url": "", "escondido": False, "auto_confirmar": True, "iniciar_sozinho": False,
                         "bacbo_padroes_desligados": [], "bacbo_padroes_extras": "",
-                        "bacbo_url": "", "bacbo_escondido": False, "bacbo_auto_confirmar": True}
+                        "bacbo_url": "", "bacbo_escondido": False, "bacbo_auto_confirmar": True,
+                        "bacbo_regra": "longo", "banca_roleta": 1000.0, "banca_bacbo": 1000.0}
 
 
 def _arquivo_config_painel() -> str:
@@ -2319,9 +2323,13 @@ class SessaoWeb:
 
     # --- sessão e modo -------------------------------------------------------------
     def nova_sessao(self, config: Config) -> None:
+        """Zera a banca e o placar; os números que já saíram continuam no histórico."""
         with self.trava:
+            numeros = [g.numero for g in self.motor.historico]
             self.config = config
             self.motor = MotorWeb(config)
+            if numeros:
+                self.motor.carregar_historico(numeros)
 
     def trocar_modo(self, modo: str) -> None:
         with self.trava:
@@ -2402,7 +2410,9 @@ class Html:
             f"--rr-green:{c['green']};--rr-blue:{c['blue']};--rr-gold:{c['gold']};--rr-good:{c['good']};--rr-bad:{c['bad']};"
             "--rr-display:'Bricolage Grotesque','Segoe UI',system-ui,sans-serif;--rr-mono:'JetBrains Mono',ui-monospace,Consolas,monospace;}",
             # força o escuro mesmo se o Streamlit estiver no tema claro
-            ".stApp,[data-testid='stAppViewContainer']{background:radial-gradient(1200px 600px at 75% -10%,rgba(255,45,75,.07),transparent 60%),var(--rr-bg)!important;color:var(--rr-ink);}",
+            ".stApp,[data-testid='stAppViewContainer']{background:radial-gradient(1200px 600px at 75% -10%,rgba(255,45,75,.08),transparent 60%),"
+            "url(\"data:image/svg+xml,%3Csvg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%201600%20420%22%20preserveAspectRatio=%22none%22%3E%3Cdefs%3E%3ClinearGradient%20id=%22g%22%20gradientUnits=%22userSpaceOnUse%22%20x1=%220%22%20y1=%220%22%20x2=%220%22%20y2=%22420%22%3E%3Cstop%20offset=%220%22%20stop-color=%22%233d8bff%22%20stop-opacity=%220%22/%3E%3Cstop%20offset=%221%22%20stop-color=%22%233d8bff%22%20stop-opacity=%22.2%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Cg%20stroke=%22url%28%23g%29%22%20stroke-width=%221.2%22%20fill=%22none%22%3E%3Cline%20x1=%22512.0%22%20y1=%220%22%20x2=%22-1600%22%20y2=%22420%22/%3E%3Cline%20x1=%22524.0%22%20y1=%220%22%20x2=%22-1500%22%20y2=%22420%22/%3E%3Cline%20x1=%22536.0%22%20y1=%220%22%20x2=%22-1400%22%20y2=%22420%22/%3E%3Cline%20x1=%22548.0%22%20y1=%220%22%20x2=%22-1300%22%20y2=%22420%22/%3E%3Cline%20x1=%22560.0%22%20y1=%220%22%20x2=%22-1200%22%20y2=%22420%22/%3E%3Cline%20x1=%22572.0%22%20y1=%220%22%20x2=%22-1100%22%20y2=%22420%22/%3E%3Cline%20x1=%22584.0%22%20y1=%220%22%20x2=%22-1000%22%20y2=%22420%22/%3E%3Cline%20x1=%22596.0%22%20y1=%220%22%20x2=%22-900%22%20y2=%22420%22/%3E%3Cline%20x1=%22608.0%22%20y1=%220%22%20x2=%22-800%22%20y2=%22420%22/%3E%3Cline%20x1=%22620.0%22%20y1=%220%22%20x2=%22-700%22%20y2=%22420%22/%3E%3Cline%20x1=%22632.0%22%20y1=%220%22%20x2=%22-600%22%20y2=%22420%22/%3E%3Cline%20x1=%22644.0%22%20y1=%220%22%20x2=%22-500%22%20y2=%22420%22/%3E%3Cline%20x1=%22656.0%22%20y1=%220%22%20x2=%22-400%22%20y2=%22420%22/%3E%3Cline%20x1=%22668.0%22%20y1=%220%22%20x2=%22-300%22%20y2=%22420%22/%3E%3Cline%20x1=%22680.0%22%20y1=%220%22%20x2=%22-200%22%20y2=%22420%22/%3E%3Cline%20x1=%22692.0%22%20y1=%220%22%20x2=%22-100%22%20y2=%22420%22/%3E%3Cline%20x1=%22704.0%22%20y1=%220%22%20x2=%220%22%20y2=%22420%22/%3E%3Cline%20x1=%22716.0%22%20y1=%220%22%20x2=%22100%22%20y2=%22420%22/%3E%3Cline%20x1=%22728.0%22%20y1=%220%22%20x2=%22200%22%20y2=%22420%22/%3E%3Cline%20x1=%22740.0%22%20y1=%220%22%20x2=%22300%22%20y2=%22420%22/%3E%3Cline%20x1=%22752.0%22%20y1=%220%22%20x2=%22400%22%20y2=%22420%22/%3E%3Cline%20x1=%22764.0%22%20y1=%220%22%20x2=%22500%22%20y2=%22420%22/%3E%3Cline%20x1=%22776.0%22%20y1=%220%22%20x2=%22600%22%20y2=%22420%22/%3E%3Cline%20x1=%22788.0%22%20y1=%220%22%20x2=%22700%22%20y2=%22420%22/%3E%3Cline%20x1=%22800.0%22%20y1=%220%22%20x2=%22800%22%20y2=%22420%22/%3E%3Cline%20x1=%22812.0%22%20y1=%220%22%20x2=%22900%22%20y2=%22420%22/%3E%3Cline%20x1=%22824.0%22%20y1=%220%22%20x2=%221000%22%20y2=%22420%22/%3E%3Cline%20x1=%22836.0%22%20y1=%220%22%20x2=%221100%22%20y2=%22420%22/%3E%3Cline%20x1=%22848.0%22%20y1=%220%22%20x2=%221200%22%20y2=%22420%22/%3E%3Cline%20x1=%22860.0%22%20y1=%220%22%20x2=%221300%22%20y2=%22420%22/%3E%3Cline%20x1=%22872.0%22%20y1=%220%22%20x2=%221400%22%20y2=%22420%22/%3E%3Cline%20x1=%22884.0%22%20y1=%220%22%20x2=%221500%22%20y2=%22420%22/%3E%3Cline%20x1=%22896.0%22%20y1=%220%22%20x2=%221600%22%20y2=%22420%22/%3E%3Cline%20x1=%22908.0%22%20y1=%220%22%20x2=%221700%22%20y2=%22420%22/%3E%3Cline%20x1=%22920.0%22%20y1=%220%22%20x2=%221800%22%20y2=%22420%22/%3E%3Cline%20x1=%22932.0%22%20y1=%220%22%20x2=%221900%22%20y2=%22420%22/%3E%3Cline%20x1=%22944.0%22%20y1=%220%22%20x2=%222000%22%20y2=%22420%22/%3E%3Cline%20x1=%22956.0%22%20y1=%220%22%20x2=%222100%22%20y2=%22420%22/%3E%3Cline%20x1=%22968.0%22%20y1=%220%22%20x2=%222200%22%20y2=%22420%22/%3E%3Cline%20x1=%22980.0%22%20y1=%220%22%20x2=%222300%22%20y2=%22420%22/%3E%3Cline%20x1=%22992.0%22%20y1=%220%22%20x2=%222400%22%20y2=%22420%22/%3E%3Cline%20x1=%221004.0%22%20y1=%220%22%20x2=%222500%22%20y2=%22420%22/%3E%3Cline%20x1=%221016.0%22%20y1=%220%22%20x2=%222600%22%20y2=%22420%22/%3E%3Cline%20x1=%221028.0%22%20y1=%220%22%20x2=%222700%22%20y2=%22420%22/%3E%3Cline%20x1=%221040.0%22%20y1=%220%22%20x2=%222800%22%20y2=%22420%22/%3E%3Cline%20x1=%221052.0%22%20y1=%220%22%20x2=%222900%22%20y2=%22420%22/%3E%3Cline%20x1=%221064.0%22%20y1=%220%22%20x2=%223000%22%20y2=%22420%22/%3E%3Cline%20x1=%221076.0%22%20y1=%220%22%20x2=%223100%22%20y2=%22420%22/%3E%3Cline%20x1=%221088.0%22%20y1=%220%22%20x2=%223200%22%20y2=%22420%22/%3E%3Cline%20x1=%22-1600%22%20y1=%221.5%22%20x2=%223200%22%20y2=%221.5%22/%3E%3Cline%20x1=%22-1600%22%20y1=%226.8%22%20x2=%223200%22%20y2=%226.8%22/%3E%3Cline%20x1=%22-1600%22%20y1=%2216.7%22%20x2=%223200%22%20y2=%2216.7%22/%3E%3Cline%20x1=%22-1600%22%20y1=%2231.4%22%20x2=%223200%22%20y2=%2231.4%22/%3E%3Cline%20x1=%22-1600%22%20y1=%2251.3%22%20x2=%223200%22%20y2=%2251.3%22/%3E%3Cline%20x1=%22-1600%22%20y1=%2276.6%22%20x2=%223200%22%20y2=%2276.6%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22107.6%22%20x2=%223200%22%20y2=%22107.6%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22144.3%22%20x2=%223200%22%20y2=%22144.3%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22187.0%22%20x2=%223200%22%20y2=%22187.0%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22235.8%22%20x2=%223200%22%20y2=%22235.8%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22290.8%22%20x2=%223200%22%20y2=%22290.8%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22352.2%22%20x2=%223200%22%20y2=%22352.2%22/%3E%3Cline%20x1=%22-1600%22%20y1=%22420.0%22%20x2=%223200%22%20y2=%22420.0%22/%3E%3C/g%3E%3C/svg%3E\") center bottom/100% 46vh no-repeat fixed,"
+            "radial-gradient(900px 380px at 50% 105%,rgba(61,139,255,.10),transparent 70%) fixed,var(--rr-bg)!important;color:var(--rr-ink);}",
             "[data-testid='stHeader']{background:transparent!important;}",
             "[data-testid='stSidebar']{background:#0f1218!important;border-right:1px solid var(--rr-line);}",
             "[data-testid='stSidebar'] *,.stApp label,.stApp p,.stApp span,.stApp li{color:var(--rr-ink);}",
@@ -2417,7 +2427,8 @@ class Html:
             ".stApp [data-testid='stProgress'] div[role='progressbar']>div>div{background:var(--rr-red)!important;}",
             # cabeçalho
             ".rr-topo{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:18px;}",
-            ".rr-titulo{font-family:var(--rr-display);font-weight:800;font-size:2rem;letter-spacing:-.03em;line-height:1;margin:0;color:var(--rr-ink);}",
+            ".rr-titulo{font-family:var(--rr-display);font-weight:800;font-size:2.1rem;letter-spacing:-.03em;line-height:1;margin:0;color:var(--rr-ink);"
+            "text-shadow:0 1px 0 #b9bec9,0 2px 0 #8a909c,0 3px 0 #5d636e,0 4px 0 #3c414b,0 9px 14px rgba(0,0,0,.75);}",
             ".rr-sub{font-family:var(--rr-mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--rr-muted);margin-bottom:6px;}",
             ".rr-status{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;border:1px solid var(--rr-line);background:var(--rr-surface);font-family:var(--rr-mono);font-size:.78rem;color:var(--rr-ink2);}",
             ".rr-status i{width:8px;height:8px;border-radius:50%;background:var(--rr-muted);display:inline-block;}",
@@ -2425,27 +2436,33 @@ class Html:
             ".rr-status.alerta i{background:var(--rr-gold);}",
             "@keyframes rr-ping{0%{box-shadow:0 0 0 0 rgba(20,210,122,.55)}80%{box-shadow:0 0 0 8px rgba(20,210,122,0)}100%{box-shadow:0 0 0 0 rgba(20,210,122,0)}}",
             # cartões
-            ".rr-cartoes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:4px 0 18px;}",
-            ".rr-cartao{background:linear-gradient(180deg,var(--rr-surface2),var(--rr-surface));border:1px solid var(--rr-line);border-radius:14px;padding:16px 18px;display:grid;gap:6px;min-width:0;}",
+            ".rr-cartoes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin:4px 0 22px;}",
+            ".rr-cartao{background:linear-gradient(160deg,#1f2534 0%,#151a25 55%,#10141c 100%);border:1px solid var(--rr-line);border-radius:14px;padding:16px 18px;display:grid;gap:6px;min-width:0;"
+            "box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 5px 0 -1px #0a0d13,0 16px 26px -12px rgba(0,0,0,.9);transition:transform .25s ease,box-shadow .25s ease;}",
+            ".rr-cartao:hover{transform:perspective(700px) rotateX(6deg) translateY(-3px);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 8px 0 -1px #0a0d13,0 24px 32px -14px rgba(0,0,0,.95);}",
             ".rr-cartao .r{font-family:var(--rr-mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--rr-muted);}",
             ".rr-cartao .v{font-family:var(--rr-display);font-weight:800;font-size:1.9rem;letter-spacing:-.02em;line-height:1.05;color:var(--rr-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
             ".rr-cartao .d{font-family:var(--rr-mono);font-size:.76rem;color:var(--rr-ink2);}",
             ".rr-pos{color:var(--rr-good)!important;}.rr-neg{color:var(--rr-bad)!important;}",
             # pedras
-            ".rr-bloco{background:var(--rr-surface);border:1px solid var(--rr-line);border-radius:14px;padding:16px 18px;margin-bottom:16px;}",
+            ".rr-bloco{background:linear-gradient(170deg,#161b26,var(--rr-surface) 60%);border:1px solid var(--rr-line);border-radius:14px;padding:16px 18px;margin-bottom:18px;"
+            "box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 5px 0 -1px #0a0d13,0 18px 28px -16px rgba(0,0,0,.85);}",
             ".rr-bloco .rr-h{font-family:var(--rr-display);font-weight:800;font-size:1rem;margin:0 0 12px;color:var(--rr-ink);letter-spacing:-.01em;}",
             ".rr-bloco .rr-h small{font-family:var(--rr-mono);font-weight:400;font-size:.7rem;color:var(--rr-muted);margin-left:8px;letter-spacing:.06em;text-transform:uppercase;}",
             ".rr-pedras{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}",
             ".rr-pedra{width:40px;height:40px;border-radius:50%;display:inline-grid;place-items:center;flex:none;font-family:var(--rr-mono);font-weight:700;font-size:.92rem;color:#fff;}",
-            ".rr-pedra.v{background:radial-gradient(circle at 35% 30%,#ff5a70,var(--rr-red) 60%);box-shadow:0 0 12px rgba(255,45,75,.55);}",
-            ".rr-pedra.p{background:linear-gradient(160deg,#23262e,var(--rr-black));box-shadow:inset 0 0 0 1px #343a47;}",
-            ".rr-pedra.z{background:radial-gradient(circle at 35% 30%,#4dffa6,var(--rr-green) 60%);box-shadow:0 0 14px rgba(20,210,122,.6);color:#04140b;}",
+            ".rr-pedra,.bb-chip{text-shadow:0 1px 2px rgba(0,0,0,.55);}",
+            ".rr-pedra.v{background:radial-gradient(circle at 26% 19%,rgba(255,255,255,.9) 0,rgba(255,255,255,.3) 5%,rgba(255,255,255,0) 13%),radial-gradient(circle at 42% 38%,#ff7488 0%,#e8233f 52%,#7d0c1c 100%);box-shadow:inset -3px -5px 9px rgba(0,0,0,.42),inset 2px 3px 5px rgba(255,255,255,.16),0 6px 10px rgba(0,0,0,.6);}",
+            ".rr-pedra.p{background:radial-gradient(circle at 26% 19%,rgba(255,255,255,.9) 0,rgba(255,255,255,.3) 5%,rgba(255,255,255,0) 13%),radial-gradient(circle at 42% 38%,#5a606e 0%,#262a33 52%,#07080b 100%);box-shadow:inset -3px -5px 9px rgba(0,0,0,.42),inset 2px 3px 5px rgba(255,255,255,.16),0 6px 10px rgba(0,0,0,.6);}",
+            ".rr-pedra.z{background:radial-gradient(circle at 26% 19%,rgba(255,255,255,.9) 0,rgba(255,255,255,.3) 5%,rgba(255,255,255,0) 13%),radial-gradient(circle at 42% 38%,#7dffc0 0%,#12c873 52%,#05633a 100%);box-shadow:inset -3px -5px 9px rgba(0,0,0,.42),inset 2px 3px 5px rgba(255,255,255,.16),0 6px 10px rgba(0,0,0,.6);color:#04140b;text-shadow:none;}",
             ".rr-pedra.pq{width:30px;height:30px;font-size:.78rem;}",
-            ".rr-pedra.nova{width:52px;height:52px;font-size:1.15rem;outline:2px solid var(--rr-ink);outline-offset:3px;}",
+            ".rr-pedra.nova{width:52px;height:52px;font-size:1.15rem;outline:2px solid var(--rr-ink);outline-offset:3px;animation:rr-flutua 3s ease-in-out infinite;}",
+            "@keyframes rr-flutua{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}",
             ".rr-pedras .rot{font-family:var(--rr-mono);font-size:.68rem;color:var(--rr-muted);letter-spacing:.08em;text-transform:uppercase;}",
             # alertas
             ".rr-alerta{position:relative;border-radius:16px;padding:20px 22px;margin-bottom:16px;background:linear-gradient(135deg,rgba(255,45,75,.12),rgba(19,23,32,.95) 45%);border:1px solid var(--rr-red);animation:rr-brilho 2.2s ease-in-out infinite;}",
-            "@keyframes rr-brilho{0%,100%{box-shadow:0 0 0 1px rgba(255,45,75,.6),0 0 22px rgba(255,45,75,.25)}50%{box-shadow:0 0 0 1px rgba(255,45,75,.9),0 0 38px rgba(255,45,75,.5)}}",
+            "@keyframes rr-brilho{0%,100%{box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 6px 0 -1px #3a0a14,0 0 0 1px rgba(255,45,75,.6),0 0 22px rgba(255,45,75,.25)}"
+            "50%{box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 6px 0 -1px #3a0a14,0 0 0 1px rgba(255,45,75,.9),0 0 38px rgba(255,45,75,.5)}}",
             ".rr-alerta .tag{font-family:var(--rr-mono);font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--rr-red);font-weight:700;}",
             ".rr-alerta .pad{font-family:var(--rr-display);font-weight:800;font-size:1.25rem;margin:4px 0 12px;color:var(--rr-ink);}",
             ".rr-alerta .grade{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start;}",
@@ -2453,7 +2470,8 @@ class Html:
             ".rr-alvos{display:flex;flex-wrap:wrap;gap:8px;}",
             ".rr-alvo{display:inline-flex;align-items:center;gap:10px;padding:10px 14px;border-radius:12px;background:var(--rr-surface2);border:1px solid var(--rr-line);font-family:var(--rr-display);font-weight:800;font-size:1.15rem;color:var(--rr-ink);}",
             ".rr-alvo small{font-family:var(--rr-mono);font-weight:400;font-size:.72rem;color:var(--rr-ink2);}",
-            ".rr-alvo .sw{width:22px;height:22px;border-radius:50%;display:inline-block;}",
+            ".rr-alvo .sw{width:22px;height:22px;border-radius:50%;display:inline-block;background-image:radial-gradient(circle at 33% 28%,rgba(255,255,255,.85) 0,rgba(255,255,255,0) 30%)!important;"
+            "box-shadow:inset -2px -3px 5px rgba(0,0,0,.45),0 3px 6px rgba(0,0,0,.5);}",
             ".rr-valor{font-family:var(--rr-display);font-weight:800;font-size:1.5rem;color:var(--rr-ink);}",
             ".rr-valor small{display:block;font-family:var(--rr-mono);font-weight:400;font-size:.74rem;color:var(--rr-ink2);margin-top:2px;}",
             ".rr-validade{margin-top:14px;font-family:var(--rr-mono);font-size:.74rem;color:var(--rr-ink2);}",
@@ -2480,30 +2498,35 @@ class Html:
             ".rr-selo.ok{background:rgba(47,209,122,.12);color:var(--rr-good);border:1px solid rgba(47,209,122,.35);}",
             ".rr-selo.nao{background:rgba(255,77,94,.12);color:var(--rr-bad);border:1px solid rgba(255,77,94,.35);}",
             ".rr-marca{font-family:var(--rr-display);font-weight:800;font-size:1.25rem;letter-spacing:-.02em;color:var(--rr-ink);display:flex;align-items:center;gap:10px;margin:4px 0 2px;}",
-            ".rr-marca i{width:14px;height:14px;border-radius:50%;background:conic-gradient(var(--rr-red) 0 33%,var(--rr-black) 0 66%,var(--rr-green) 0);box-shadow:0 0 10px rgba(255,45,75,.5);display:inline-block;}",
+            ".rr-marca i{width:16px;height:16px;border-radius:50%;background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0,rgba(255,255,255,0) 35%),conic-gradient(var(--rr-red) 0 33%,var(--rr-black) 0 66%,var(--rr-green) 0);box-shadow:inset -2px -2px 4px rgba(0,0,0,.5),0 3px 8px rgba(0,0,0,.6);display:inline-block;}",
             # Bac Bo: pedras azul (Player), vermelha (Banker) e dourada (Empate), com a soma vencedora
             ".bb-chip{width:40px;height:40px;border-radius:50%;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;flex:none;font-family:var(--rr-mono);font-weight:700;font-size:.95rem;line-height:1;color:#fff;}",
             ".stApp .bb-chip small,.bb-chip small{font-size:.6rem;font-weight:600;opacity:.9;margin-top:2px;color:inherit!important;}",
-            f".bb-chip.p{{background:radial-gradient(circle at 35% 30%,#7aa5ff,{c['player']} 60%);box-shadow:0 0 12px rgba(47,111,255,.5);}}",
-            ".bb-chip.b{background:radial-gradient(circle at 35% 30%,#ff5a70,var(--rr-red) 60%);box-shadow:0 0 12px rgba(255,45,75,.5);}",
-            ".bb-chip.e{background:radial-gradient(circle at 35% 30%,#ffe2a1,var(--rr-gold) 60%);box-shadow:0 0 12px rgba(232,184,74,.5);color:#1a1300;}",
+            ".bb-chip.p{background:radial-gradient(circle at 26% 19%,rgba(255,255,255,.9) 0,rgba(255,255,255,.3) 5%,rgba(255,255,255,0) 13%),radial-gradient(circle at 42% 38%,#9dbcff 0%,#2f6fff 52%,#0f2c85 100%);box-shadow:inset -3px -5px 9px rgba(0,0,0,.42),inset 2px 3px 5px rgba(255,255,255,.16),0 6px 10px rgba(0,0,0,.6);}",
+            ".bb-chip.b{background:radial-gradient(circle at 26% 19%,rgba(255,255,255,.9) 0,rgba(255,255,255,.3) 5%,rgba(255,255,255,0) 13%),radial-gradient(circle at 42% 38%,#ff7488 0%,#e8233f 52%,#7d0c1c 100%);box-shadow:inset -3px -5px 9px rgba(0,0,0,.42),inset 2px 3px 5px rgba(255,255,255,.16),0 6px 10px rgba(0,0,0,.6);}",
+            ".bb-chip.e{background:radial-gradient(circle at 26% 19%,rgba(255,255,255,.9) 0,rgba(255,255,255,.3) 5%,rgba(255,255,255,0) 13%),radial-gradient(circle at 42% 38%,#fff1c4 0%,#e8b84a 52%,#7f5a0f 100%);box-shadow:inset -3px -5px 9px rgba(0,0,0,.42),inset 2px 3px 5px rgba(255,255,255,.16),0 6px 10px rgba(0,0,0,.6);color:#1a1300;text-shadow:0 1px 0 rgba(255,255,255,.35);}",
             ".bb-chip.pq{width:30px;height:30px;font-size:.78rem;}.bb-chip.pq small{display:none;}",
-            ".bb-chip.nova{width:52px;height:52px;font-size:1.15rem;outline:2px solid var(--rr-ink);outline-offset:3px;}",
-            f".rr-marca.bb i{{background:conic-gradient({c['player']} 0 45%,var(--rr-red) 0 90%,var(--rr-gold) 0);box-shadow:0 0 10px rgba(47,111,255,.5);}}",
+            ".bb-chip.nova{width:52px;height:52px;font-size:1.15rem;outline:2px solid var(--rr-ink);outline-offset:3px;animation:rr-flutua 3s ease-in-out infinite;}",
+            f".rr-marca.bb i{{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0,rgba(255,255,255,0) 35%),conic-gradient({c['player']} 0 45%,var(--rr-red) 0 90%,var(--rr-gold) 0);}}",
             ".st-key-bb_p button,.st-key-bb_b button,.st-key-bb_e button{width:100%;min-height:64px;border:0!important;}",
             ".st-key-bb_p button p,.st-key-bb_b button p,.st-key-bb_e button p{font-family:var(--rr-display)!important;font-weight:800!important;font-size:1.15rem!important;letter-spacing:.04em;color:#fff!important;}",
-            f".st-key-bb_p button{{background:{c['player']}!important;}}.st-key-bb_b button{{background:var(--rr-red)!important;}}",
-            ".st-key-bb_e button{background:var(--rr-gold)!important;}.st-key-bb_e button p{color:#1a1300!important;}",
+            f".st-key-bb_p button{{background:linear-gradient(180deg,#5a8cff,{c['player']})!important;box-shadow:0 6px 0 #173a9a,0 12px 18px rgba(0,0,0,.45)!important;}}",
+            ".st-key-bb_b button{background:linear-gradient(180deg,#ff5a72,var(--rr-red))!important;box-shadow:0 6px 0 #8c1426,0 12px 18px rgba(0,0,0,.45)!important;}",
+            ".st-key-bb_e button{background:linear-gradient(180deg,#ffd987,var(--rr-gold))!important;box-shadow:0 6px 0 #8a6414,0 12px 18px rgba(0,0,0,.45)!important;}.st-key-bb_e button p{color:#1a1300!important;}",
+            ".st-key-bb_p button,.st-key-bb_b button,.st-key-bb_e button{transition:transform .08s ease,box-shadow .08s ease;}",
+            ".st-key-bb_p button:active,.st-key-bb_b button:active,.st-key-bb_e button:active{transform:translateY(5px);box-shadow:0 1px 0 rgba(0,0,0,.6)!important;}",
             ".rr-aviso{font-family:var(--rr-mono);font-size:.78rem;color:var(--rr-gold);margin:-6px 0 14px;}",
             "@media (max-width:900px){.rr-cartoes{grid-template-columns:repeat(2,minmax(0,1fr));}.rr-alerta .grade{grid-template-columns:1fr;}}",
             "@media (max-width:520px){.rr-cartao{padding:14px;}.rr-cartao .v{font-size:1.3rem;white-space:normal;overflow:visible;}}",
-            "@media (prefers-reduced-motion:reduce){.rr-alerta,.rr-status.on i{animation:none;}}",
+            "@media (prefers-reduced-motion:reduce){.rr-alerta,.rr-status.on i,.rr-pedra.nova,.bb-chip.nova{animation:none;}.rr-cartao{transition:none;}}",
         ]
         # tabuleiro do modo manual: cada botão com a cor do número (classe st-key-<key> do Streamlit)
         for n in range(37):
-            cor = {"v": c["red"], "p": "#20232b", "z": "#0fb868"}[cls.tipo_cor(n)]
-            regras.append(f".st-key-rr_num_{n} button{{background:{cor}!important;color:#fff!important;border:0!important;"
-                          f"min-height:44px;font-family:var(--rr-mono);font-weight:700;}}")
+            cor, borda = {"v": (c["red"], "#7d0c1c"), "p": ("#2a2e38", "#07080b"), "z": ("#0fb868", "#05633a")}[cls.tipo_cor(n)]
+            regras.append(f".st-key-rr_num_{n} button{{background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,0) 60%),{cor}!important;"
+                          f"color:#fff!important;border:0!important;min-height:44px;font-family:var(--rr-mono);font-weight:700;"
+                          f"box-shadow:0 4px 0 {borda},0 8px 12px rgba(0,0,0,.45)!important;transition:transform .08s ease;}}"
+                          f".st-key-rr_num_{n} button:active{{transform:translateY(3px);box-shadow:0 1px 0 {borda}!important;}}")
         return "<style>" + "".join(regras) + "</style>"
 
     @staticmethod
@@ -2540,7 +2563,7 @@ class Html:
             acerto_txt, acerto_det = "—", "aparece depois do primeiro sinal"
         esperado = -total.apostado * VANTAGEM_DA_CASA
         return '<div class="rr-cartoes">' + "".join([
-            cls.cartao("Banca fictícia", formatar_reais(banca.saldo),
+            cls.cartao("Banca", formatar_reais(banca.saldo),
                        f'<span class="{"rr-pos" if variacao >= 0 else "rr-neg"}">{formatar_reais(variacao, com_sinal=True)}</span>'
                        f" desde o início"),
             cls.cartao("Acerto geral", acerto_txt, acerto_det),
@@ -2582,7 +2605,7 @@ class Html:
                 f'<div><div class="lbl">Valor sugerido</div><div class="rr-valor">{formatar_reais(cfg.valor_por_alvo)}'
                 f'<small>em cada alvo · {formatar_reais(total)} no total</small></div></div>'
                 f'<div><div class="lbl">Proteção</div>{protecao}</div>'
-                f'</div><div class="rr-validade">Vale só para o próximo giro. O painel confere sozinho e lança na banca fictícia.</div></div>')
+                f'</div><div class="rr-validade">Vale só para o próximo giro. O painel confere sozinho e lança na banca.</div></div>')
 
     @classmethod
     def sem_alerta(cls, motor: MotorWeb) -> str:
@@ -2659,7 +2682,7 @@ class Html:
             ult = curva[-1]
             partes.append(f'<circle cx="{sx(ult[0]):.1f}" cy="{sy(ult[idx]):.1f}" r="5" fill="{cor}" stroke="{Html.CORES["surface"]}" stroke-width="2"/>')
         partes.append("</svg>")
-        legenda = (f'<div class="rr-legenda"><span><i style="background:{Html.CORES["blue"]}"></i>Banca fictícia (resultado acumulado)</span>'
+        legenda = (f'<div class="rr-legenda"><span><i style="background:{Html.CORES["blue"]}"></i>Banca (resultado acumulado)</span>'
                    f'<span><i style="background:#8b93a3"></i>{html.escape(previsto)}</span></div>')
         return f'<div class="rr-bloco rr-graf"><div class="rr-h">{titulo}</div>{legenda}{"".join(partes)}</div>'
 
@@ -2685,7 +2708,9 @@ def app_web() -> None:
 
     @st.cache_resource
     def obter_sessao() -> SessaoWeb:
-        return SessaoWeb()
+        sessao = SessaoWeb()
+        sessao.nova_sessao(config_pela_banca(_banca_salva("roleta"), bacbo=False))  # banca que você deixou salva
+        return sessao
 
     if no_meu_pc:
         sessao = obter_sessao()
@@ -2699,42 +2724,48 @@ def app_web() -> None:
         marca = st.container()  # a marca fica no topo, mas depende do jogo escolhido logo abaixo
         jogo = st.radio("Jogo", [JOGO_ROLETA, JOGO_BACBO], key="rr_jogo", horizontal=True)
         e_bacbo = jogo == JOGO_BACBO
+        sub = ("Bac Bo (Evolution)" if e_bacbo else "Roleta europeia") + ("" if no_meu_pc else " · banca fictícia")
         marca.markdown(f'<div class="rr-marca{" bb" if e_bacbo else ""}"><i></i>'
-                       f'{"Robô de Bac Bo" if e_bacbo else "Robô de Roleta"}</div>'
-                       f'<div class="rr-sub">{"Bac Bo (Evolution)" if e_bacbo else "Roleta europeia"} · banca fictícia</div>',
+                       f'{"Robô de Bac Bo" if e_bacbo else "Robô de Roleta"}</div><div class="rr-sub">{sub}</div>',
                        unsafe_allow_html=True)
-        # No PC abre na mesa automática; hospedado, abre no backtest (o que funciona online)
-        modo = st.radio("Modo de operação", [MODO_AUTO, MODO_MANUAL, MODO_SIM, MODO_BACKTEST],
-                        index=0 if no_meu_pc else 3, key="rr_modo")
         bacbo = obter_bacbo(sessao, no_meu_pc) if e_bacbo else None
-        if bacbo is not None:
-            ajustes, config_tela, mudou = _ajustes_bacbo(st, bacbo)
-            _padroes_bacbo(st, bacbo)
+        if no_meu_pc:
+            # No seu PC: só o jogo, a banca e o botão Entrar. A mesa é lida sozinha.
+            modo = MODO_AUTO
+            config_tela = _banca_lateral(st, bacbo if bacbo is not None else sessao, bacbo is not None)
+            if bacbo is not None:
+                _padroes_bacbo(st, bacbo)
         else:
-            with st.expander("Ajustes da banca fictícia"):
-                valor = st.number_input("Valor por alvo (R$)", min_value=1.0, max_value=100000.0, value=10.0, step=1.0, key="rr_valor")
-                cobrir_zero = st.checkbox("Cobrir o zero", value=True, key="rr_zero_on")
-                valor_zero = st.number_input("Valor no zero (R$)", min_value=0.0, max_value=100000.0, value=1.0, step=0.5, key="rr_zero_valor")
-                banca_ini = st.number_input("Banca inicial (R$)", min_value=1.0, max_value=10_000_000.0, value=1000.0, step=100.0, key="rr_banca")
-                st.caption("Os valores padrão são os dos testes de aceitação.")
-            ajustes = dict(valor_por_alvo=float(valor), protecao_zero=bool(cobrir_zero),
-                           valor_protecao_zero=float(valor_zero), banca_inicial=float(banca_ini))
-            try:
-                config_tela = Config(**ajustes)
-            except ValueError as erro:
-                st.error(f"Ajuste inválido: {erro}")
-                config_tela = Config()
-            mudou = any(getattr(sessao.config, k) != v for k, v in ajustes.items())
-        if modo != MODO_BACKTEST:
-            if mudou:
-                st.caption("Os ajustes novos valem a partir de uma nova sessão.")
-            if st.button("Nova sessão", key="rr_nova", type="primary" if mudou else "secondary"):
-                if bacbo is not None:
-                    bacbo.nova_sessao(config_tela)
-                else:
-                    sessao.nova_sessao(config_tela)
-        st.markdown('<div class="rr-nota">O robô só observa. Nenhuma aposta é feita: '
-                    'todos os valores são de uma banca fictícia.</div>', unsafe_allow_html=True)
+            # Hospedado (portfólio): a leitura automática não existe, então ficam os outros modos
+            modo = st.radio("Modo de operação", [MODO_AUTO, MODO_MANUAL, MODO_SIM, MODO_BACKTEST], index=3, key="rr_modo")
+            if bacbo is not None:
+                ajustes, config_tela, mudou = _ajustes_bacbo(st, bacbo)
+                _padroes_bacbo(st, bacbo)
+            else:
+                with st.expander("Ajustes da banca fictícia"):
+                    valor = st.number_input("Valor por alvo (R$)", min_value=1.0, max_value=100000.0, value=10.0, step=1.0, key="rr_valor")
+                    cobrir_zero = st.checkbox("Cobrir o zero", value=True, key="rr_zero_on")
+                    valor_zero = st.number_input("Valor no zero (R$)", min_value=0.0, max_value=100000.0, value=1.0, step=0.5, key="rr_zero_valor")
+                    banca_ini = st.number_input("Banca inicial (R$)", min_value=1.0, max_value=10_000_000.0, value=1000.0, step=100.0, key="rr_banca")
+                    st.caption("Os valores padrão são os dos testes de aceitação.")
+                ajustes = dict(valor_por_alvo=float(valor), protecao_zero=bool(cobrir_zero),
+                               valor_protecao_zero=float(valor_zero), banca_inicial=float(banca_ini))
+                try:
+                    config_tela = Config(**ajustes)
+                except ValueError as erro:
+                    st.error(f"Ajuste inválido: {erro}")
+                    config_tela = Config()
+                mudou = any(getattr(sessao.config, k) != v for k, v in ajustes.items())
+            if modo != MODO_BACKTEST:
+                if mudou:
+                    st.caption("Os ajustes novos valem a partir de uma nova sessão.")
+                if st.button("Nova sessão", key="rr_nova", type="primary" if mudou else "secondary"):
+                    if bacbo is not None:
+                        bacbo.nova_sessao(config_tela)
+                    else:
+                        sessao.nova_sessao(config_tela)
+            st.markdown('<div class="rr-nota">O robô só observa. Nenhuma aposta é feita: '
+                        'todos os valores são de uma banca fictícia.</div>', unsafe_allow_html=True)
         # Só no seu PC: hospedado, um visitante não pode desligar o site nem trocar o código
         atualizar = no_meu_pc and st.button("Atualizar robô", key="rr_atualizar")
         desligar = no_meu_pc and st.button("Desligar o painel", key="rr_desligar")
@@ -2848,9 +2879,8 @@ def app_web() -> None:
             st.markdown("".join(Html.alerta(s, motor) for s in motor.pendentes), unsafe_allow_html=True)
         else:
             st.markdown(Html.sem_alerta(motor), unsafe_allow_html=True)
-        esquerda, direita = st.columns([1, 1.4])
-        esquerda.markdown(Html.feed(motor), unsafe_allow_html=True)
-        direita.markdown(Html.tabela_padroes(motor.banca), unsafe_allow_html=True)
+        st.markdown(Html.feed(motor, limite=12), unsafe_allow_html=True)
+        _botao_salvar(st, csv_sessao_roleta(motor), "roleta", "rr")
         st.markdown(Html.grafico_curva(motor.curva, "Banca da sessão"), unsafe_allow_html=True)
 
     # O fragmento redesenha só esta parte a cada 1 s enquanto há leitura ou simulação,
@@ -3202,6 +3232,50 @@ PADROES_BACBO: List[PadraoBacBo] = [
 ]
 
 
+TAMANHO_GATILHO_BACBO = {"rep3": 3, "alt4": 4, "rep2": 2, "emp": 1, "2x2": 4, "surf4": 4}
+
+
+def _tamanho_gatilho(chave: str) -> int:
+    """Quantas rodadas formam o gatilho (o padrão mais longo é o mais específico)."""
+    if chave.startswith("c:"):
+        return len(chave[2:].split(">")[0])
+    return TAMANHO_GATILHO_BACBO.get(chave, 3)
+
+
+# Quando os padrões da mesma rodada apontam alvos diferentes (ex.: PPBB dispara "2 iguais"
+# -> BANKER e "Duplas" -> PLAYER), o robô dá UMA entrada só. Regras possíveis:
+REGRA_PULAR, REGRA_MAIS_LONGO = "pular", "longo"
+REGRA_PADRAO = REGRA_MAIS_LONGO
+NOMES_REGRA = {REGRA_MAIS_LONGO: "Vale o padrão mais longo", REGRA_PULAR: "Não entra na rodada"}
+
+
+def consolidar_sinais(brutos: List["SinalBacBo"], regra: str = REGRA_PADRAO
+                      ) -> Tuple[List["SinalBacBo"], List["SinalBacBo"]]:
+    """
+    Junta os sinais da rodada numa entrada só. Devolve (entrada, descartados):
+      - todos no mesmo alvo  -> uma entrada (os nomes dos padrões ficam juntos)
+      - alvos diferentes     -> "pular": nenhuma entrada | "longo": vale o alvo do padrão
+                                mais longo (se dois do mesmo tamanho discordarem, não entra)
+    """
+    if not brutos:
+        return [], []
+    alvos = {s.alvo for s in brutos}
+    if len(alvos) > 1:
+        if regra != REGRA_MAIS_LONGO:
+            return [], list(brutos)
+        maior = max(_tamanho_gatilho(s.chave) for s in brutos)
+        alvos_maior = {s.alvo for s in brutos if _tamanho_gatilho(s.chave) == maior}
+        if len(alvos_maior) > 1:
+            return [], list(brutos)
+        alvos = alvos_maior
+    alvo = alvos.pop()
+    juntos = [s for s in brutos if s.alvo == alvo]
+    descartados = [s for s in brutos if s.alvo != alvo]
+    principal = max(juntos, key=lambda s: _tamanho_gatilho(s.chave))
+    nome = " + ".join(s.nome for s in sorted(juntos, key=lambda s: -_tamanho_gatilho(s.chave)))
+    return [SinalBacBo(principal.chave, nome, alvo, principal.rodada_origem)], descartados
+
+
 def ler_padroes_personalizados(texto: str) -> Tuple[List[PadraoBacBo], List[str]]:
     """
     Lê padrões escritos por você, um por linha, no formato SEQUÊNCIA -> ALVO
@@ -3279,41 +3353,43 @@ class EstrategiaBacBo:
 
 
 class BancaBacBo:
-    """Liquida cada sinal na rodada seguinte com os pagamentos reais do Bac Bo."""
+    """
+    Duas contas, com os pagamentos reais do Bac Bo:
+      - a banca: UMA entrada por rodada (a que o painel manda fazer);
+      - o placar de cada padrão como se ele entrasse sozinho (para comparar os padrões).
+    """
 
     def __init__(self, config: ConfigBacBo) -> None:
         self.config = config
         self.saldo = config.banca_inicial
         self.menor_saldo = config.banca_inicial
-        self.estatisticas: Dict[str, EstatisticaPadrao] = {}
+        self.geral = EstatisticaPadrao()               # entradas de verdade
+        self.estatisticas: Dict[str, EstatisticaPadrao] = {}  # cada padrão sozinho
         self.nomes: Dict[str, str] = {}
         self.tipos: Dict[str, str] = {}
         self.apostado_lado = 0.0
         self.apostado_empate = 0.0
+        self.entradas_tipo = {"lado": 0, "empate": 0}
 
-    def liquidar(self, sinal: SinalBacBo, rodada: RodadaBacBo) -> ResultadoBacBo:
+    def _calcular(self, alvo: str, rodada: RodadaBacBo) -> Tuple[str, float, float, float, float]:
+        """(status, total apostado, lucro, apostado no lado, apostado no empate) de uma entrada."""
         ficha = self.config.valor_por_alvo
-        if sinal.alvo == EMPATE:
-            apostado, acertou = ficha, rodada.resultado == EMPATE
-            self.apostado_empate += ficha
+        if alvo == EMPATE:
+            acertou = rodada.resultado == EMPATE
             retorno = ficha * (1 + rodada.paga_empate) if acertou else 0.0
-            status = "GREEN" if acertou else "LOSS"
+            return ("GREEN" if acertou else "LOSS"), ficha, retorno - ficha, 0.0, ficha
+        protecao = self.config.valor_protecao_empate if self.config.protecao_empate else 0.0
+        apostado = ficha + protecao
+        if rodada.resultado == alvo:
+            retorno, status = ficha * 2, "GREEN"
+        elif rodada.resultado == EMPATE:
+            retorno, status = ficha * DEVOLUCAO_NO_EMPATE + protecao * (1 + rodada.paga_empate), "EMPATE"
         else:
-            protecao = self.config.valor_protecao_empate if self.config.protecao_empate else 0.0
-            apostado, acertou = ficha + protecao, rodada.resultado == sinal.alvo
-            self.apostado_lado += ficha
-            self.apostado_empate += protecao
-            if acertou:
-                retorno = ficha * 2
-            elif rodada.resultado == EMPATE:
-                retorno = ficha * DEVOLUCAO_NO_EMPATE + protecao * (1 + rodada.paga_empate)
-            else:
-                retorno = 0.0
-            status = "GREEN" if acertou else ("EMPATE" if rodada.resultado == EMPATE else "LOSS")
-        lucro = retorno - apostado
+            retorno, status = 0.0, "LOSS"
+        return status, apostado, retorno - apostado, ficha, protecao
 
-        est = self.estatisticas.setdefault(sinal.chave, EstatisticaPadrao())
-        self.nomes[sinal.chave], self.tipos[sinal.chave] = sinal.nome, sinal.tipo
+    @staticmethod
+    def _somar(est: EstatisticaPadrao, status: str, apostado: float, lucro: float) -> None:
         est.sinais += 1
         est.apostado += apostado
         est.lucro += lucro
@@ -3323,16 +3399,26 @@ class BancaBacBo:
             est.greens_protecao += 1
         else:
             est.losses += 1
+
+    def liquidar(self, sinal: SinalBacBo, rodada: RodadaBacBo) -> ResultadoBacBo:
+        """A entrada da rodada (a única que mexe na banca)."""
+        status, apostado, lucro, no_lado, no_empate = self._calcular(sinal.alvo, rodada)
+        self._somar(self.geral, status, apostado, lucro)
+        self.apostado_lado += no_lado
+        self.apostado_empate += no_empate
+        self.entradas_tipo[sinal.tipo] += 1
         self.saldo += lucro
         self.menor_saldo = min(self.menor_saldo, self.saldo)
         return ResultadoBacBo(sinal, rodada, status, apostado, lucro)
 
+    def registrar_padrao(self, sinal: SinalBacBo, rodada: RodadaBacBo) -> None:
+        """Placar do padrão como se ele entrasse sozinho (não mexe na banca)."""
+        status, apostado, lucro, _, _ = self._calcular(sinal.alvo, rodada)
+        self.nomes[sinal.chave], self.tipos[sinal.chave] = sinal.nome, sinal.tipo
+        self._somar(self.estatisticas.setdefault(sinal.chave, EstatisticaPadrao()), status, apostado, lucro)
+
     def total(self) -> EstatisticaPadrao:
-        soma = EstatisticaPadrao()
-        for est in self.estatisticas.values():
-            for campo in ("sinais", "greens", "greens_protecao", "losses", "apostado", "lucro"):
-                setattr(soma, campo, getattr(soma, campo) + getattr(est, campo))
-        return soma
+        return copy.copy(self.geral)
 
     def esperado(self) -> float:
         """Quanto a matemática prevê perder com o que foi apostado (em cada tipo de aposta)."""
@@ -3350,40 +3436,56 @@ class SimuladorBacBo:
 
 
 class MotorBacBo:
-    """O mesmo ciclo do motor da roleta: registra, liquida os sinais anteriores, procura novos."""
+    """
+    O mesmo ciclo do motor da roleta: registra a rodada, confere a entrada anterior e
+    procura padrões. Os sinais da rodada viram UMA entrada (veja consolidar_sinais).
+    """
 
-    LIMITE_FEED = 300
+    LIMITE_FEED = 5000
     LIMITE_CURVA = 3000
 
     def __init__(self, config: ConfigBacBo, padroes: Optional[List[PadraoBacBo]] = None,
-                 registrar: bool = True) -> None:
+                 registrar: bool = True, regra: str = REGRA_PADRAO) -> None:
         self.config = config
         self.estrategia = EstrategiaBacBo(padroes if padroes is not None else PADROES_BACBO)
+        self.regra = regra
         self.banca = BancaBacBo(config)
         self.historico: Deque[RodadaBacBo] = deque(maxlen=config.tamanho_historico)
-        self.pendentes: List[SinalBacBo] = []
+        self.brutos: List[SinalBacBo] = []      # o que cada padrão disparou
+        self.pendentes: List[SinalBacBo] = []   # a entrada da próxima rodada (0 ou 1)
+        self.descartados: List[SinalBacBo] = []  # sinais que discordaram e ficaram de fora
+        self.puladas = 0                         # rodadas sem entrada porque os padrões discordaram
         self.total_rodadas = 0
         self.registrar = registrar
         self.resultados: Deque[ResultadoBacBo] = deque(maxlen=self.LIMITE_FEED)
         self.curva: List[Tuple[int, float, float]] = [(0, 0.0, 0.0)]
         self._foto: Optional[tuple] = None
 
+    def reanalisar(self) -> None:
+        """Procura padrões no histórico atual e monta a entrada da próxima rodada."""
+        self.brutos = self.estrategia.analisar(self.historico, self.total_rodadas)
+        self.pendentes, self.descartados = consolidar_sinais(self.brutos, self.regra)
+
     def processar(self, rodada: RodadaBacBo, permitir_desfazer: bool = False) -> List[ResultadoBacBo]:
         if permitir_desfazer:
-            self._foto = (copy.deepcopy(self.banca), self.historico.copy(), list(self.pendentes),
-                          self.total_rodadas, list(self.resultados), list(self.curva))
+            self._foto = (copy.deepcopy(self.banca), self.historico.copy(), list(self.brutos), list(self.pendentes),
+                          list(self.descartados), self.puladas, self.total_rodadas, list(self.resultados), list(self.curva))
         self.total_rodadas += 1
         self.historico.append(rodada)
+        if self.brutos and not self.pendentes:
+            self.puladas += 1  # havia sinal, mas os padrões discordaram e a rodada ficou sem entrada
         resultados: List[ResultadoBacBo] = []
         for sinal in self.pendentes:
             try:
                 resultados.append(self.banca.liquidar(sinal, rodada))
             except Exception as erro:
                 exibir(f"⚠️  Erro ao validar {sinal.nome}: {erro}")
-        self.pendentes = self.estrategia.analisar(self.historico, self.total_rodadas)
+        for sinal in self.brutos:  # placar de cada padrão, mesmo os que ficaram de fora
+            self.banca.registrar_padrao(sinal, rodada)
+        self.reanalisar()
         if self.registrar:
             self.resultados.extend(resultados)
-            self.curva.append((self.total_rodadas, self.banca.total().lucro, self.banca.esperado()))
+            self.curva.append((self.total_rodadas, self.banca.geral.lucro, self.banca.esperado()))
             if len(self.curva) > self.LIMITE_CURVA:
                 self.curva = self.curva[:1] + self.curva[1:-1:2] + self.curva[-1:]
         return resultados
@@ -3391,25 +3493,25 @@ class MotorBacBo:
     def desfazer(self) -> bool:
         if self._foto is None:
             return False
-        banca, historico, pendentes, total, resultados, curva = self._foto
-        self.banca, self.historico, self.pendentes, self.total_rodadas = banca, historico, pendentes, total
+        (self.banca, self.historico, self.brutos, self.pendentes, self.descartados, self.puladas,
+         self.total_rodadas, resultados, self.curva) = self._foto
         self.resultados = deque(resultados, maxlen=self.LIMITE_FEED)
-        self.curva = curva
         self._foto = None
         return True
 
 
 def executar_backtest_bacbo(rodadas: int, semente: Optional[int], config: Optional[ConfigBacBo] = None,
-                            padroes: Optional[List[PadraoBacBo]] = None, ao_progredir=None) -> MotorBacBo:
+                            padroes: Optional[List[PadraoBacBo]] = None, ao_progredir=None,
+                            regra: str = REGRA_PADRAO) -> MotorBacBo:
     """Backtest do Bac Bo com dados simulados (mesma semente = mesmas rodadas)."""
     simulador = SimuladorBacBo(semente)
-    motor = MotorBacBo(config or ConfigBacBo(), padroes, registrar=False)
+    motor = MotorBacBo(config or ConfigBacBo(), padroes, registrar=False, regra=regra)
     passo = max(1, rodadas // 100)
     curva = [(0, 0.0, 0.0)]
     for n in range(1, rodadas + 1):
         motor.processar(simulador.proxima())
         if n % passo == 0 or n == rodadas:
-            curva.append((n, motor.banca.total().lucro, motor.banca.esperado()))
+            curva.append((n, motor.banca.geral.lucro, motor.banca.esperado()))
             if ao_progredir is not None:
                 ao_progredir(n / rodadas)
     motor.curva = curva
@@ -3434,14 +3536,17 @@ def rodar_bacbo_terminal(args: argparse.Namespace) -> None:
     exibir("=" * 72)
     exibir(f"Rodadas analisadas      : {formatar_inteiro(args.backtest)}")
     exibir(f"Tempo de execução       : {time.time() - inicio:.1f} s")
-    exibir(f"Sinais disparados       : {formatar_inteiro(total.sinais)}  (✅ {formatar_inteiro(total.greens)}"
+    exibir(f"Entradas (1 por rodada) : {formatar_inteiro(total.sinais)}  (✅ {formatar_inteiro(total.greens)}"
            f" | salvos no empate {formatar_inteiro(total.greens_protecao)} | ❌ {formatar_inteiro(total.losses)})")
+    exibir(f"Sem entrada (discordaram): {formatar_inteiro(motor.puladas)} rodadas"
+           f"  (regra: {NOMES_REGRA[motor.regra].lower()})")
     exibir(f"Banca inicial → final   : {formatar_reais(banca.config.banca_inicial)} → {formatar_reais(banca.saldo)}")
     exibir(f"Total apostado          : {formatar_reais(total.apostado)}")
     exibir(f"Resultado real          : {formatar_reais(total.lucro, com_sinal=True)}")
     exibir(f"Esperado pela matemática: {formatar_reais(banca.esperado(), com_sinal=True)}"
            f"  (1,13% em Player/Banker e 4,48% no empate)")
     exibir("-" * 72)
+    exibir("   Cada padrão como se entrasse sozinho:")
     for padrao in PADROES_BACBO:
         est = banca.estatisticas.get(padrao.chave, EstatisticaPadrao())
         mat = MATEMATICA_BACBO[padrao.tipo]
@@ -3458,15 +3563,7 @@ def rodar_bacbo_terminal(args: argparse.Namespace) -> None:
 # A sessão da roleta e a do Bac Bo ficam guardadas separadas: trocar de jogo não apaga nada.
 # ===================================================================================
 JOGO_ROLETA, JOGO_BACBO = "Roleta", "Bac Bo"
-TAMANHO_GATILHO_BACBO = {"rep3": 3, "alt4": 4, "rep2": 2, "emp": 1, "2x2": 4, "surf4": 4}
 SEM_SOMA = "Não sei"
-
-
-def _tamanho_gatilho(chave: str) -> int:
-    """Quantas rodadas formam o gatilho (para mostrar a sequência que disparou)."""
-    if chave.startswith("c:"):
-        return len(chave[2:].split(">")[0])
-    return TAMANHO_GATILHO_BACBO.get(chave, 3)
 
 
 # -----------------------------------------------------------------------------------
@@ -3722,6 +3819,110 @@ def _novos_depois_de(anterior: List[str], atual: List[str]) -> Optional[int]:
     return None
 
 
+# -----------------------------------------------------------------------------------
+# Banca -> valor das entradas (o painel calcula sozinho)
+# -----------------------------------------------------------------------------------
+# Regra fixa e conservadora: 1% da banca em cada alvo, arredondado para cima em reais, e
+# a proteção (empate no Bac Bo, zero na roleta) com 10% da entrada. O valor NÃO aumenta
+# depois de uma perda. No Bac Bo, a entrada nunca fica abaixo de R$ 5 (mínimo da mesa).
+PCT_POR_ALVO = 0.01
+PCT_PROTECAO = 0.10
+MINIMO_MESA_BACBO = 5.0
+
+
+def config_pela_banca(banca: float, bacbo: bool):
+    entrada = max(MINIMO_MESA_BACBO if bacbo else 1.0, float(math.ceil(banca * PCT_POR_ALVO - 1e-9)))
+    protecao = max(1.0, float(round(entrada * PCT_PROTECAO)))
+    if bacbo:
+        return ConfigBacBo(valor_por_alvo=entrada, protecao_empate=True, valor_protecao_empate=protecao, banca_inicial=banca)
+    return Config(valor_por_alvo=entrada, protecao_zero=True, valor_protecao_zero=protecao, banca_inicial=banca)
+
+
+def _banca_salva(jogo: str) -> float:
+    try:
+        valor = float(ler_config_painel().get(f"banca_{jogo}", 1000.0))
+    except (TypeError, ValueError):
+        valor = 1000.0
+    return valor if valor >= 10 else 1000.0
+
+
+def _banca_lateral(st, alvo, bacbo: bool):
+    """Campo da banca + botão Entrar. Devolve a configuração calculada para essa banca."""
+    jogo = "bacbo" if bacbo else "roleta"
+    st.markdown('<div class="rr-sub" style="margin-top:10px">Sua banca</div>', unsafe_allow_html=True)
+    valor = st.number_input("Valor da banca (R$)", min_value=10.0, max_value=10_000_000.0,
+                            value=float(alvo.config.banca_inicial), step=10.0, key=f"rr_banca_{jogo}")
+    config = config_pela_banca(float(valor), bacbo)
+    if bacbo:
+        st.caption(f"Entrada: {formatar_reais(config.valor_por_alvo)} por sinal + "
+                   f"{formatar_reais(config.valor_protecao_empate)} no empate")
+    else:
+        st.caption(f"Entrada: {formatar_reais(config.valor_por_alvo)} em cada alvo + "
+                   f"{formatar_reais(config.valor_protecao_zero)} no zero")
+    campos = ("valor_por_alvo", "banca_inicial") + (("valor_protecao_empate",) if bacbo else ("valor_protecao_zero",))
+    mudou = any(getattr(alvo.config, c) != getattr(config, c) for c in campos)
+    if st.button("Entrar", key="rr_entrar", type="primary" if mudou else "secondary"):
+        alvo.nova_sessao(config)
+        salvar_config_painel({f"banca_{jogo}": float(valor)})
+        mudou = False
+    if mudou:
+        st.caption("Clique em Entrar para começar com essa banca.")
+    return config
+
+
+# -----------------------------------------------------------------------------------
+# Botão "Salvar sessão": baixa uma planilha (CSV, abre no Excel) com cada entrada
+# -----------------------------------------------------------------------------------
+def _planilha(linhas: List[List[str]]) -> bytes:
+    saida = io.StringIO()
+    csv.writer(saida, delimiter=";", lineterminator="\r\n").writerows(linhas)
+    return saida.getvalue().encode("utf-8-sig")  # com BOM: o Excel reconhece os acentos
+
+
+def _reais_planilha(valor: float) -> str:
+    return f"{valor:.2f}".replace(".", ",")
+
+
+def _bancas_depois(saldo: float, lucros: List[float]) -> List[float]:
+    """Banca depois de cada entrada, calculada de trás para a frente a partir da banca atual."""
+    depois, atual = [], saldo
+    for lucro in reversed(lucros):
+        depois.append(atual)
+        atual -= lucro
+    return list(reversed(depois))
+
+
+def csv_sessao_bacbo(motor: MotorBacBo) -> bytes:
+    itens = list(motor.resultados)
+    linhas = [["Data e hora", "Saiu", "Soma", "Padrão", "Entrada em", "Resultado",
+               "Apostado (R$)", "Lucro (R$)", "Banca depois (R$)"]]
+    for r, banca in zip(itens, _bancas_depois(motor.banca.saldo, [r.lucro for r in itens])):
+        linhas.append([r.rodada.horario.strftime("%d/%m/%Y %H:%M:%S"), NOMES_LADO[r.rodada.resultado],
+                       str(r.rodada.soma_vencedora or ""), r.sinal.nome, NOMES_LADO[r.sinal.alvo], r.status,
+                       _reais_planilha(r.total_apostado), _reais_planilha(r.lucro), _reais_planilha(banca)])
+    return _planilha(linhas)
+
+
+def csv_sessao_roleta(motor: MotorWeb) -> bytes:
+    itens = list(motor.resultados)
+    linhas = [["Data e hora", "Número", "Padrão", "Entrada em", "Resultado",
+               "Apostado (R$)", "Lucro (R$)", "Banca depois (R$)"]]
+    for r, banca in zip(itens, _bancas_depois(motor.banca.saldo, [r.lucro for r in itens])):
+        if r.sinal.tipo == "cor":
+            alvo = str(r.sinal.alvos[0])
+        else:
+            alvo = ("dúzias " if r.sinal.tipo == "duzia" else "colunas ") + " e ".join(str(a) for a in r.sinal.alvos)
+        linhas.append([r.giro.horario.strftime("%d/%m/%Y %H:%M:%S"), str(r.giro.numero), r.sinal.padrao, alvo,
+                       r.status, _reais_planilha(r.total_apostado), _reais_planilha(r.lucro), _reais_planilha(banca)])
+    return _planilha(linhas)
+
+
+def _botao_salvar(st, dados: bytes, jogo: str, prefixo: str) -> None:
+    _, coluna = st.columns([4, 1])
+    coluna.download_button("Salvar sessão", data=dados, mime="text/csv", key=f"{prefixo}_salvar",
+                           file_name=f"sessao_{jogo}_{datetime.now():%Y-%m-%d_%H-%M}.csv")
+
+
 class SessaoBacBo:
     """Estado do Bac Bo no painel: sessão manual/simulador, padrões ligados e o último backtest."""
 
@@ -3734,8 +3935,10 @@ class SessaoBacBo:
         self.extras_txt: str = str(salvo.get("bacbo_padroes_extras") or "")
         self.erros_padroes: List[str] = []
         self.padroes: List[PadraoBacBo] = self._montar_padroes()
-        self.config = ConfigBacBo()
-        self.motor = MotorBacBo(self.config, self.padroes)
+        regra = salvo.get("bacbo_regra")
+        self.regra: str = regra if regra in NOMES_REGRA else REGRA_PADRAO
+        self.config = config_pela_banca(_banca_salva("bacbo"), bacbo=True) if no_meu_pc else ConfigBacBo()
+        self.motor = MotorBacBo(self.config, self.padroes, regra=self.regra)
         self.sim = {"rodando": False, "dados": None, "rng": None, "proximo": 0.0, "rapido": False}
         self.backtest: Optional[dict] = None
         self.leitor: Optional[LeitorProcesso] = None
@@ -3760,27 +3963,32 @@ class SessaoBacBo:
         extras, self.erros_padroes = ler_padroes_personalizados(self.extras_txt)
         return [p for p in PADROES_BACBO if p.chave not in self.desligados] + extras
 
-    def atualizar_padroes(self, desligados: List[str], extras_txt: str) -> None:
+    def atualizar_padroes(self, desligados: List[str], extras_txt: str, regra: Optional[str] = None) -> None:
+        regra = regra if regra in NOMES_REGRA else self.regra
         with self.trava:
-            if desligados == self.desligados and extras_txt == self.extras_txt:
+            if desligados == self.desligados and extras_txt == self.extras_txt and regra == self.regra:
                 return
-            self.desligados, self.extras_txt = list(desligados), extras_txt
+            self.desligados, self.extras_txt, self.regra = list(desligados), extras_txt, regra
             self.padroes = self._montar_padroes()
             # Vale na hora: o alerta da tela passa a mostrar só o que os padrões novos enxergam
             self.motor.estrategia.padroes = list(self.padroes)
-            self.motor.pendentes = self.motor.estrategia.analisar(self.motor.historico, self.motor.total_rodadas)
+            self.motor.regra = regra
+            self.motor.reanalisar()
             if self.no_meu_pc:
                 salvar_config_painel({"bacbo_padroes_desligados": self.desligados,
-                                      "bacbo_padroes_extras": self.extras_txt})
+                                      "bacbo_padroes_extras": self.extras_txt, "bacbo_regra": self.regra})
 
     def padroes_sao_os_prontos(self) -> bool:
-        return [p.chave for p in self.padroes] == [p.chave for p in PADROES_BACBO]
+        return [p.chave for p in self.padroes] == [p.chave for p in PADROES_BACBO] and self.regra == REGRA_PADRAO
 
     # --- sessão --------------------------------------------------------------------
     def nova_sessao(self, config: ConfigBacBo) -> None:
         with self.trava:
+            rodadas = list(self.motor.historico)
             self.config = config
-            self.motor = MotorBacBo(config, self.padroes)
+            self.motor = MotorBacBo(config, self.padroes, regra=self.regra)
+            if rodadas:
+                _carregar_historico_bacbo(self.motor, rodadas)
 
     def iniciar_sim(self, rapido: bool, semente: Optional[int]) -> None:
         with self.trava:
@@ -3827,7 +4035,7 @@ def _carregar_historico_bacbo(motor: MotorBacBo, rodadas: List[RodadaBacBo]) -> 
     """Resultados que a mesa já mostrava (do mais antigo para o mais novo), sem apostar."""
     for rodada in rodadas:
         motor.historico.append(rodada)
-    motor.pendentes = motor.estrategia.analisar(motor.historico, motor.total_rodadas)
+    motor.reanalisar()
 
 
 class HtmlBacBo:
@@ -3864,18 +4072,17 @@ class HtmlBacBo:
         banca, total = motor.banca, motor.banca.total()
         variacao = banca.saldo - motor.config.banca_inicial
         if total.sinais:
-            teorico = sum(est.sinais * MATEMATICA_BACBO[banca.tipos[ch]]["chance_teorica"]
-                          for ch, est in banca.estatisticas.items()) / total.sinais
+            teorico = sum(n * MATEMATICA_BACBO[tipo]["chance_teorica"] for tipo, n in banca.entradas_tipo.items()) / total.sinais
             acerto_txt, acerto_det = formatar_pct(total.taxa_acerto), f"chance real dos alvos: {formatar_pct(teorico)}"
         else:
             acerto_txt, acerto_det = "—", "aparece depois do primeiro sinal"
         esperado = banca.esperado()
         return '<div class="rr-cartoes">' + "".join([
-            Html.cartao("Banca fictícia", formatar_reais(banca.saldo),
+            Html.cartao("Banca", formatar_reais(banca.saldo),
                         f'<span class="{"rr-pos" if variacao >= 0 else "rr-neg"}">{formatar_reais(variacao, com_sinal=True)}</span>'
                         f" desde o início"),
             Html.cartao("Acerto geral", acerto_txt, acerto_det),
-            Html.cartao("Sinais conferidos", formatar_inteiro(total.sinais),
+            Html.cartao("Entradas conferidas", formatar_inteiro(total.sinais),
                         f'<span class="rr-pos">{total.greens} GREEN</span> · <span class="rr-neg">{total.losses} LOSS</span>'
                         f" · {total.greens_protecao} salvos no empate"),
             Html.cartao("Resultado vs. esperado", formatar_reais(total.lucro, com_sinal=True),
@@ -3911,18 +4118,24 @@ class HtmlBacBo:
                 f'<div class="lbl" style="margin-top:14px">Sequência que disparou</div><div class="rr-pedras">{gatilho}</div></div>'
                 f'<div><div class="lbl">Valor sugerido</div>{valor}</div>'
                 f'<div><div class="lbl">Proteção</div>{protecao}</div>'
-                f'</div><div class="rr-validade">Vale só para a próxima rodada. O painel confere sozinho e lança na banca fictícia.</div></div>')
+                f'</div><div class="rr-validade">Vale só para a próxima rodada. O painel confere sozinho e lança na banca.</div></div>')
+
+    @staticmethod
+    def _lista_sinais(sinais: List[SinalBacBo]) -> str:
+        return " · ".join(f"{html.escape(s.nome)} ({NOMES_LADO[s.alvo]})" for s in sinais)
 
     @classmethod
     def alertas(cls, motor: MotorBacBo) -> str:
-        lados = {s.alvo for s in motor.pendentes}
-        aviso = ('<div class="rr-aviso">Sinais opostos nesta rodada (Player e Banker): '
-                 'entrando nos dois, um anula o outro.</div>') if {PLAYER, BANKER} <= lados else ""
+        aviso = (f'<div class="rr-aviso">Ficou de fora por discordar do padrão mais longo: '
+                 f'{cls._lista_sinais(motor.descartados)}</div>') if motor.descartados else ""
         return "".join(cls.alerta(s, motor) for s in motor.pendentes) + aviso
 
     @classmethod
     def sem_alerta(cls, motor: MotorBacBo, padroes: List[PadraoBacBo]) -> str:
         ultimo = cls.chip(motor.historico[-1], "pq") if motor.historico else ""
+        if motor.descartados:  # os padrões discordaram e a regra mandou não entrar
+            return (f'<div class="rr-calmo">{ultimo}<div><b>Padrões discordaram: sem entrada nesta rodada</b><br>'
+                    f'<span>{cls._lista_sinais(motor.descartados)}</span></div></div>')
         if padroes:
             texto = f"{len(padroes)} padrões ligados · o alerta aparece aqui assim que uma sequência se formar"
         else:
@@ -3966,7 +4179,8 @@ class HtmlBacBo:
         return (f'<div class="rr-bloco"><div class="rr-h">{titulo}</div><table class="rr-tabela"><thead><tr><th>Padrão</th><th>Sinais</th>'
                 f"<th>Acerto</th><th>Chance real</th><th>Para empatar</th><th>Resultado</th></tr></thead>"
                 f'<tbody>{"".join(linhas)}</tbody></table>'
-                f'<div class="rr-nota">Acerto é quantas vezes o alvo saiu. Em Player ou Banker, o empate dos dados não conta como acerto '
+                f'<div class="rr-nota">Cada padrão aparece como se entrasse sozinho, para dar para comparar; a banca conta uma entrada '
+                f'por rodada. Acerto é quantas vezes o alvo saiu. Em Player ou Banker, o empate dos dados não conta como acerto '
                 f'(volta 90% da entrada). Para empatar considera só a aposta principal, sem a proteção. '
                 f"Com poucos sinais o acerto oscila muito; com muitos, ele encosta na chance real.</div></div>")
 
@@ -3998,11 +4212,17 @@ def _padroes_bacbo(st, bacbo: SessaoBacBo) -> None:
         st.session_state["bb_pad_sel"] = [nomes[ch] for ch in nomes if ch not in bacbo.desligados]
     if "bb_pad_extra" not in st.session_state:
         st.session_state["bb_pad_extra"] = bacbo.extras_txt
+    if "bb_regra" not in st.session_state:
+        st.session_state["bb_regra"] = NOMES_REGRA[bacbo.regra]
     with st.expander("Padrões do Bac Bo"):
         escolhidos = st.multiselect("Padrões prontos ligados", list(nomes.values()), key="bb_pad_sel")
         texto = st.text_area("Seus padrões (um por linha)", key="bb_pad_extra", height=120,
                              placeholder="PPB -> P\nBBBB -> P\nEP -> E")
-        bacbo.atualizar_padroes([ch for ch, nome in nomes.items() if nome not in escolhidos], texto or "")
+        nome_regra = st.radio("Se os padrões discordarem na mesma rodada", list(NOMES_REGRA.values()), key="bb_regra",
+                              help="O robô dá uma entrada só por rodada. Padrões que apontam o mesmo alvo viram "
+                                   "uma entrada; se apontarem alvos diferentes, vale esta regra.")
+        regra = next(chave for chave, nome in NOMES_REGRA.items() if nome == nome_regra)
+        bacbo.atualizar_padroes([ch for ch, nome in nomes.items() if nome not in escolhidos], texto or "", regra)
         for erro in bacbo.erros_padroes:
             st.error(erro)
         st.caption("P = Player, B = Banker, E = Empate. O padrão dispara quando as últimas rodadas forem "
@@ -4070,9 +4290,8 @@ def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: C
             st.markdown(HtmlBacBo.alertas(motor), unsafe_allow_html=True)
         else:
             st.markdown(HtmlBacBo.sem_alerta(motor, bacbo.padroes), unsafe_allow_html=True)
-        esquerda, direita = st.columns([1, 1.4])
-        esquerda.markdown(HtmlBacBo.feed(motor), unsafe_allow_html=True)
-        direita.markdown(HtmlBacBo.tabela(motor.banca, bacbo.padroes), unsafe_allow_html=True)
+        st.markdown(HtmlBacBo.feed(motor, limite=12), unsafe_allow_html=True)
+        _botao_salvar(st, csv_sessao_bacbo(motor), "bacbo", "bb")
         st.markdown(Html.grafico_curva(motor.curva, "Banca da sessão", "rodadas", HtmlBacBo.PREVISTO),
                     unsafe_allow_html=True)
 
@@ -4148,7 +4367,8 @@ def _tela_backtest_bacbo(st, bacbo: SessaoBacBo, config_tela: ConfigBacBo, demon
             barra = st.progress(0.0, text="Simulando...")
             inicio = time.time()
             motor = executar_backtest_bacbo(int(rodadas), int(semente), config_tela, list(bacbo.padroes),
-                                            ao_progredir=lambda f: barra.progress(min(1.0, f), text=f"Simulando... {f * 100:.0f}%"))
+                                            ao_progredir=lambda f: barra.progress(min(1.0, f), text=f"Simulando... {f * 100:.0f}%"),
+                                            regra=bacbo.regra)
             barra.empty()
             bacbo.backtest = {"rodadas": int(rodadas), "semente": int(semente), "motor": motor,
                               "padroes": list(bacbo.padroes), "segundos": time.time() - inicio,
@@ -4159,20 +4379,21 @@ def _tela_backtest_bacbo(st, bacbo: SessaoBacBo, config_tela: ConfigBacBo, demon
         resultado = demonstracao()  # versão hospedada: mostra o teste de aceitação já pronto
     if not resultado:
         st.markdown('<div class="rr-calmo"><div><b>Rode um backtest</b><br><span>1.000.000 de rodadas com semente 42, '
-                    'os 6 padrões prontos e os ajustes padrão é o teste de aceitação: tem que dar 592.519 sinais '
-                    'e −R$ 113.722,00.</span></div></div>', unsafe_allow_html=True)
+                    'os 6 padrões prontos, os ajustes padrão e “vale o padrão mais longo” é o teste de aceitação: '
+                    'tem que dar 515.257 entradas e −R$ 105.951,00.</span></div></div>', unsafe_allow_html=True)
         return
     if resultado.get("demonstracao"):
-        st.caption("Demonstração com os 6 padrões prontos e os ajustes padrão. Rode o seu backtest para testar "
-                   "os padrões que você ligou ou cadastrou.")
+        st.caption("Demonstração com os 6 padrões prontos, os ajustes padrão e “vale o padrão mais longo”. "
+                   "Rode o seu backtest para testar os padrões e a regra que você escolheu.")
     motor: MotorBacBo = resultado["motor"]
     total = motor.banca.total()
     st.markdown('<div class="rr-cartoes">' + "".join([
         Html.cartao("Rodadas simuladas", formatar_inteiro(resultado["rodadas"]),
                     f'semente {resultado["semente"]} · {resultado["segundos"]:.1f} s'),
-        Html.cartao("Sinais conferidos", formatar_inteiro(total.sinais),
+        Html.cartao("Entradas conferidas", formatar_inteiro(total.sinais),
                     f'<span class="rr-pos">{formatar_inteiro(total.greens)} GREEN</span> · '
-                    f'<span class="rr-neg">{formatar_inteiro(total.losses)} LOSS</span>'),
+                    f'<span class="rr-neg">{formatar_inteiro(total.losses)} LOSS</span> · '
+                    f'{formatar_inteiro(motor.puladas)} sem entrada (discordaram)'),
         Html.cartao("Resultado real", formatar_reais(total.lucro, com_sinal=True),
                     (f"{total.lucro / total.apostado * 100:.2f}%".replace(".", ",") + " do total apostado")
                     if total.apostado else "nenhum sinal disparado",
@@ -4181,10 +4402,10 @@ def _tela_backtest_bacbo(st, bacbo: SessaoBacBo, config_tela: ConfigBacBo, demon
                     "1,13% em Player/Banker · 4,48% no empate"),
     ]) + "</div>", unsafe_allow_html=True)
     if resultado["rodadas"] == 1_000_000 and resultado["semente"] == 42 and resultado["padrao"]:
-        bateu = total.sinais == 592_519 and round(total.lucro, 2) == -113_722.0
+        bateu = total.sinais == 515_257 and round(total.lucro, 2) == -105_951.0
         st.markdown(f'<div class="rr-selo {"ok" if bateu else "nao"}">'
                     f'{"Teste de aceitação: bateu" if bateu else "Teste de aceitação: NÃO bateu"} · '
-                    f'{formatar_inteiro(total.sinais)} sinais · {formatar_reais(total.lucro, com_sinal=True)}</div>',
+                    f'{formatar_inteiro(total.sinais)} entradas · {formatar_reais(total.lucro, com_sinal=True)}</div>',
                     unsafe_allow_html=True)
     st.markdown(Html.grafico_curva(motor.curva, "Banca no backtest", "rodadas", HtmlBacBo.PREVISTO), unsafe_allow_html=True)
     st.markdown(HtmlBacBo.tabela(motor.banca, resultado["padroes"], "Desempenho por padrão no backtest"),

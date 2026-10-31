@@ -48,6 +48,8 @@ Além desses, o painel aceita **padrões cadastrados por você**, um por linha (
 
 ### Resultado do backtest (1.000.000 de rodadas, semente 42)
 
+Cada padrão como se entrasse sozinho:
+
 | Padrão | Sinais | Acerto | Chance real | Resultado |
 |---|---|---|---|---|
 | 3 iguais → lado oposto | 97.190 | 44,3% | 44,4% | −R$ 13.475 |
@@ -56,9 +58,8 @@ Além desses, o painel aceita **padrões cadastrados por você**, um por linha (
 | Empate → empate | 112.920 | 11,4% | 11,3% | −R$ 37.040 |
 | Duplas → volta o primeiro | 77.262 | 44,3% | 44,4% | −R$ 11.931 |
 | 4 iguais → surfa | 43.040 | 44,4% | 44,4% | −R$ 8.951 |
-| **Total** | **592.519** | | | **−R$ 113.722** (−1,78% do apostado) |
 
-Entradas de R$ 10 com R$ 1 de proteção no empate. A vantagem da casa no Bac Bo é 1,13% em Player/Banker e 4,48% no empate; a matemática previa −R$ 126.028, e o resultado ficou dentro da variação normal.
+Na banca, o robô dá **uma entrada por rodada**: padrões que apontam o mesmo alvo viram uma entrada só e, quando discordam (ex.: P P B B dispara "2 iguais" → Banker e "Duplas" → Player), vale o padrão mais longo. Foram **515.257 entradas** e a banca terminou em **−R$ 105.951** (−1,91% do apostado), com entradas de R$ 10 e R$ 1 de proteção no empate. A vantagem da casa no Bac Bo é 1,13% em Player/Banker e 4,48% no empate; a matemática previa −R$ 113.866, e o resultado ficou dentro da variação normal.
 
 ## Funcionalidades
 
@@ -67,9 +68,11 @@ Entradas de R$ 10 com R$ 1 de proteção no empate. A vantagem da casa no Bac Bo
 - **4 modos:** leitura automática da mesa ao vivo (Playwright, só no computador), entrada manual com tabuleiro clicável, simulador ao vivo e backtest em massa.
 - **Leitura ao vivo do Bac Bo:** lê o quadro de bolinhas da mesa pelo `data-type="roadItemColor"` do SVG, ordena pela posição na tela (coluna por coluna) e entende quando o quadro enche e a coluna mais antiga sai.
 - **Padrões do Bac Bo configuráveis:** liga e desliga os prontos e cadastra os seus em texto simples; ficam salvos no computador.
+- **Uma entrada por rodada:** sinais no mesmo alvo se juntam; sinais que discordam seguem a regra escolhida (vale o mais longo, ou não entra).
+- **No computador, painel enxuto:** só o jogo e a banca; o valor da entrada é calculado sozinho (1% da banca por alvo) e o botão **Salvar sessão** baixa a planilha das entradas.
 - **Leitura ao vivo robusta:** acha a faixa de resultados pelo atributo `data-role="number-N"` (inclusive em iframes aninhados e shadow DOM), confirma cada mudança com duas leituras, recupera giros perdidos e reencontra a faixa se a página recarregar.
 - **Modo terminal completo**, com menu, para quem prefere rodar sem navegador.
-- **Testes de aceitação reproduzíveis:** `--backtest 1000000 --semente 42` sempre dá 195.368 sinais e −R$ 90.804,00 na roleta; `--jogo bacbo --backtest 1000000 --semente 42` sempre dá 592.519 sinais e −R$ 113.722,00 no Bac Bo.
+- **Testes de aceitação reproduzíveis:** `--backtest 1000000 --semente 42` sempre dá 195.368 sinais e −R$ 90.804,00 na roleta; `--jogo bacbo --backtest 1000000 --semente 42` sempre dá 515.257 entradas e −R$ 105.951,00 no Bac Bo.
 
 ## Arquitetura
 
