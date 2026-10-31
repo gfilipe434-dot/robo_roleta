@@ -29,6 +29,7 @@ COMO RODAR (Python 3.9+)
   python robo_roleta.py --web                  PAINEL VISUAL no navegador, rodando escondido
                                                (precisa: pip install streamlit)
   python robo_roleta.py --atalho               cria um atalho na Área de Trabalho para o painel
+  python robo_roleta.py --atualizar            baixa a versão mais nova do GitHub e troca este arquivo
 
   Para parar: Ctrl+C (ou "s" no modo mesa real). O relatório final aparece sempre.
 
@@ -1516,6 +1517,8 @@ def ler_argumentos(argv: List[str]) -> argparse.Namespace:
                         help="abre o painel visual no navegador, rodando escondido (precisa: pip install streamlit)")
     parser.add_argument("--atalho", action="store_true",
                         help="cria na Área de Trabalho um atalho que abre o painel direto (Windows)")
+    parser.add_argument("--atualizar", action="store_true",
+                        help="baixa a versão mais nova do robô no GitHub e troca este arquivo")
     parser.add_argument("--leitor-json", action="store_true", help=argparse.SUPPRESS)  # usado pelo painel
     return parser.parse_args(argv)
 
@@ -1535,6 +1538,7 @@ def menu_inicial() -> Optional[List[str]]:
     exibir("  5) Backtest (simula milhares de giros de uma vez)")
     exibir("  6) Painel visual no navegador (roda escondido, sem esta janela)")
     exibir("  7) Criar atalho do painel na Área de Trabalho")
+    exibir("  8) Atualizar o robô (baixa a versão mais nova do GitHub)")
     exibir("  0) Sair")
     exibir("=" * 72)
     while True:
@@ -1560,9 +1564,11 @@ def menu_inicial() -> Optional[List[str]]:
             return ["--web"]
         if escolha == "7":
             return ["--atalho"]
+        if escolha == "8":
+            return ["--atualizar"]
         if escolha == "0":
             return None
-        exibir("⚠️  Opção inválida. Digite um número de 0 a 7.")
+        exibir("⚠️  Opção inválida. Digite um número de 0 a 8.")
 
 
 def pausar_antes_de_fechar() -> None:
@@ -1657,6 +1663,13 @@ def main() -> None:
             return
         if args.atalho:
             criar_atalho_area_de_trabalho()
+            return
+        if args.atualizar:
+            exibir("🌐 Procurando a versão mais nova no GitHub...")
+            ok, trocou, mensagem = atualizar_robo()
+            avisar(("✅ " if ok else "") + mensagem, erro=not ok)
+            if trocou:
+                exibir("   Feche esta janela e abra o robô de novo para usar a versão nova.")
             return
         if args.sem_emoji:
             USAR_EMOJI = False
@@ -1794,6 +1807,52 @@ def abrir_painel_web() -> bool:
         final = "(sem log)"
     avisar(f"O painel não respondeu a tempo. Últimas linhas do log ({arquivo_log}):\n{final}", erro=True)
     return False
+
+
+# -----------------------------------------------------------------------------------
+# Atualização automática: baixa a versão mais nova publicada no GitHub
+# -----------------------------------------------------------------------------------
+URL_ATUALIZACAO = "https://raw.githubusercontent.com/gfilipe434-dot/robo_roleta/main/robo_roleta.py"
+
+
+def atualizar_robo(url: str = URL_ATUALIZACAO) -> Tuple[bool, bool, str]:
+    """
+    Baixa o robo_roleta.py mais novo do GitHub e troca este arquivo por ele.
+    Antes de trocar, confere se o arquivo baixado é mesmo o robô (e se não tem erro de
+    digitação no código) e guarda a versão atual como <nome>_anterior.py, por segurança.
+    Devolve (deu_certo, trocou_o_arquivo, mensagem).
+    """
+    destino = os.path.abspath(__file__)
+    # O "?t=..." no fim pede ao GitHub a cópia mais recente, e não uma guardada em cache
+    endereco = url + ("&" if "?" in url else "?") + f"t={int(time.time())}"
+    try:
+        with urllib.request.urlopen(endereco, timeout=25) as resposta:
+            novo = resposta.read()
+    except Exception as erro:
+        return False, False, f"Não consegui baixar a versão nova ({erro}). Confira a internet e tente de novo."
+    try:
+        texto = novo.decode("utf-8")
+        compile(texto, destino, "exec")  # garante que o código baixado não está quebrado
+        if "class EstrategiaRoleta" not in texto or "def app_web" not in texto:
+            raise ValueError("o conteúdo não é o robô")
+    except Exception as erro:
+        return False, False, f"O arquivo baixado não parece o robô ({erro}). Nada foi trocado."
+    with open(destino, "rb") as arq:
+        atual = arq.read()
+    if atual.replace(b"\r\n", b"\n") == novo.replace(b"\r\n", b"\n"):
+        return True, False, "Você já está com a versão mais nova."
+    base, extensao = os.path.splitext(destino)
+    temporario = base + ".baixando" + extensao
+    try:
+        with open(base + "_anterior" + extensao, "wb") as arq:  # cópia de segurança
+            arq.write(atual)
+        with open(temporario, "wb") as arq:
+            arq.write(novo)
+        os.replace(temporario, destino)  # troca de uma vez só (nunca fica meio arquivo)
+    except OSError as erro:
+        return False, False, f"Não consegui gravar o arquivo novo ({erro}). Nada foi trocado."
+    return True, True, ("Robô atualizado para a versão mais nova. "
+                        f"A anterior ficou guardada como {os.path.basename(base)}_anterior{extensao}.")
 
 
 def _comando_atalho(destino_python: str, script: str) -> List[str]:
@@ -2519,8 +2578,26 @@ def app_web() -> None:
                 sessao.nova_sessao(config_tela)
         st.markdown('<div class="rr-nota">O robô só observa. Nenhuma aposta é feita: '
                     'todos os valores são de uma banca fictícia.</div>', unsafe_allow_html=True)
-        # Só no seu PC: hospedado, um visitante não pode desligar o site dos outros
+        # Só no seu PC: hospedado, um visitante não pode desligar o site nem trocar o código
+        atualizar = no_meu_pc and st.button("Atualizar robô", key="rr_atualizar")
         desligar = no_meu_pc and st.button("Desligar o painel", key="rr_desligar")
+
+    if atualizar:
+        with st.spinner("Baixando a versão mais nova do GitHub..."):
+            ok, trocou, mensagem = atualizar_robo()
+        if trocou:
+            # Para tudo e limpa o estado guardado: na próxima execução o Streamlit já lê o
+            # arquivo novo, e o painel recomeça com o código atualizado.
+            sessao.parar_leitor()
+            sessao.sim["rodando"] = False
+            st.cache_resource.clear()
+            st.success(mensagem + " Recarregando o painel...")
+            time.sleep(1.5)
+            st.rerun()
+        elif ok:
+            st.info(mensagem)
+        else:
+            st.error(mensagem)
 
     if desligar:
         # O painel roda escondido; este botão é o jeito de desligá-lo.
