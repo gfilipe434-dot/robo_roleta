@@ -2239,8 +2239,8 @@ class Html:
             ".rr-pos{color:var(--rr-good)!important;}.rr-neg{color:var(--rr-bad)!important;}",
             # pedras
             ".rr-bloco{background:var(--rr-surface);border:1px solid var(--rr-line);border-radius:14px;padding:16px 18px;margin-bottom:16px;}",
-            ".rr-bloco h4{font-family:var(--rr-display);font-weight:800;font-size:1rem;margin:0 0 12px;color:var(--rr-ink);letter-spacing:-.01em;}",
-            ".rr-bloco h4 small{font-family:var(--rr-mono);font-weight:400;font-size:.7rem;color:var(--rr-muted);margin-left:8px;letter-spacing:.06em;text-transform:uppercase;}",
+            ".rr-bloco .rr-h{font-family:var(--rr-display);font-weight:800;font-size:1rem;margin:0 0 12px;color:var(--rr-ink);letter-spacing:-.01em;}",
+            ".rr-bloco .rr-h small{font-family:var(--rr-mono);font-weight:400;font-size:.7rem;color:var(--rr-muted);margin-left:8px;letter-spacing:.06em;text-transform:uppercase;}",
             ".rr-pedras{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}",
             ".rr-pedra{width:40px;height:40px;border-radius:50%;display:inline-grid;place-items:center;flex:none;font-family:var(--rr-mono);font-weight:700;font-size:.92rem;color:#fff;}",
             ".rr-pedra.v{background:radial-gradient(circle at 35% 30%,#ff5a70,var(--rr-red) 60%);box-shadow:0 0 12px rgba(255,45,75,.55);}",
@@ -2309,10 +2309,10 @@ class Html:
     def faixa_pedras(cls, historico: Deque[Giro]) -> str:
         giros = list(historico)[::-1]  # mais recente primeiro
         if not giros:
-            return ('<div class="rr-bloco"><h4>Últimas pedras</h4>'
+            return ('<div class="rr-bloco"><div class="rr-h">Últimas pedras</div>'
                     '<span class="rr-nota">Nenhum giro ainda. Os números aparecem aqui assim que saírem.</span></div>')
         pedras = "".join(cls.pedra(g.numero, "nova" if i == 0 else "") for i, g in enumerate(giros))
-        return (f'<div class="rr-bloco"><h4>Últimas pedras<small>mais recente à esquerda</small></h4>'
+        return (f'<div class="rr-bloco"><div class="rr-h">Últimas pedras<small>mais recente à esquerda</small></div>'
                 f'<div class="rr-pedras">{pedras}</div></div>')
 
     @staticmethod
@@ -2385,7 +2385,7 @@ class Html:
     def feed(cls, motor: MotorWeb, limite: int = 10) -> str:
         itens = list(motor.resultados)[-limite:][::-1]
         if not itens:
-            return '<div class="rr-bloco"><h4>Últimas entradas</h4><span class="rr-nota">Os sinais conferidos aparecem aqui.</span></div>'
+            return '<div class="rr-bloco"><div class="rr-h">Últimas entradas</div><span class="rr-nota">Os sinais conferidos aparecem aqui.</span></div>'
         linhas = []
         for r in itens:
             classe = "g" if r.status == "GREEN" else ("z" if r.giro.numero == 0 and r.status != "LOSS" else "l")
@@ -2393,7 +2393,7 @@ class Html:
             linhas.append(f'<div class="rr-item"><span class="rr-badge {classe}">{rotulo}</span>'
                           f'<span class="t">{html.escape(NOMES_CURTOS[r.sinal.tipo])} · saiu {r.giro.numero}</span>'
                           f'<span class="x {"rr-pos" if r.lucro > 0 else "rr-neg"}">{formatar_reais(r.lucro, com_sinal=True)}</span></div>')
-        return f'<div class="rr-bloco"><h4>Últimas entradas</h4><div class="rr-feed">{"".join(linhas)}</div></div>'
+        return f'<div class="rr-bloco"><div class="rr-h">Últimas entradas</div><div class="rr-feed">{"".join(linhas)}</div></div>'
 
     @staticmethod
     def tabela_padroes(banca: BancaFicticia, titulo: str = "Desempenho por padrão") -> str:
@@ -2405,7 +2405,7 @@ class Html:
                           f"<td>{formatar_pct(mat['chance_teorica'])}</td><td>{formatar_pct(mat['acerto_minimo'])}</td>"
                           f'<td class="{"rr-pos" if est.lucro > 0 else ("rr-neg" if est.lucro < 0 else "")}">'
                           f"{formatar_reais(est.lucro, com_sinal=True)}</td></tr>")
-        return (f'<div class="rr-bloco"><h4>{titulo}</h4><table class="rr-tabela"><thead><tr><th>Padrão</th><th>Sinais</th>'
+        return (f'<div class="rr-bloco"><div class="rr-h">{titulo}</div><table class="rr-tabela"><thead><tr><th>Padrão</th><th>Sinais</th>'
                 f"<th>Acerto</th><th>Chance real</th><th>Para empatar</th><th>Resultado</th></tr></thead>"
                 f'<tbody>{"".join(linhas)}</tbody></table>'
                 f'<div class="rr-nota">Acerto é quantas vezes o alvo saiu. Chance real é a probabilidade do alvo em qualquer giro. '
@@ -2414,7 +2414,7 @@ class Html:
     @staticmethod
     def grafico_curva(curva: List[Tuple[int, float, float]], titulo: str, rotulo_x: str = "giros") -> str:
         if len(curva) < 2:
-            return (f'<div class="rr-bloco"><h4>{titulo}</h4>'
+            return (f'<div class="rr-bloco"><div class="rr-h">{titulo}</div>'
                     '<span class="rr-nota">O gráfico aparece depois do primeiro sinal conferido.</span></div>')
         W, H, ml, mr, mt, mb = 960, 300, 86, 16, 14, 34
         xs = [p[0] for p in curva]
@@ -2451,7 +2451,7 @@ class Html:
         partes.append("</svg>")
         legenda = (f'<div class="rr-legenda"><span><i style="background:{Html.CORES["blue"]}"></i>Banca fictícia (resultado acumulado)</span>'
                    f'<span><i style="background:#8b93a3"></i>Previsto pela matemática (−1/37 do apostado)</span></div>')
-        return f'<div class="rr-bloco rr-graf"><h4>{titulo}</h4>{legenda}{"".join(partes)}</div>'
+        return f'<div class="rr-bloco rr-graf"><div class="rr-h">{titulo}</div>{legenda}{"".join(partes)}</div>'
 
 
 MODO_AUTO, MODO_MANUAL = "Mesa real (automática)", "Mesa real (manual)"
@@ -2532,7 +2532,9 @@ def app_web() -> None:
     sessao.trocar_modo(modo)
 
     # --------------------------- cabeçalho -----------------------------------------
-    if modo == MODO_AUTO:
+    if modo == MODO_AUTO and importlib.util.find_spec("playwright") is None:
+        status = ("Só no computador", "alerta")  # hospedado: não existe Chrome para ler a mesa
+    elif modo == MODO_AUTO:
         fase = sessao.leitor.fase if sessao.leitor else None
         status = {"iniciando": ("Conectando ao Chrome", "alerta"), "conectando": ("Conectando ao Chrome", "alerta"),
                   "procurando": ("Procurando a faixa", "alerta"), "lendo": ("Lendo a mesa ao vivo", "on"),
@@ -2544,7 +2546,7 @@ def app_web() -> None:
     else:
         status = ("Backtest", "")
     st.markdown(f'<div class="rr-topo"><div><div class="rr-sub">{html.escape(modo)}</div>'
-                f'<h1 class="rr-titulo">Painel de sinais</h1></div>'
+                f'<div class="rr-titulo" role="heading" aria-level="1">Painel de sinais</div></div>'
                 f'<span class="rr-status {status[1]}"><i></i>{status[0]}</span></div>', unsafe_allow_html=True)
 
     if modo == MODO_BACKTEST:
