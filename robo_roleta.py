@@ -826,8 +826,9 @@ class ColetorNavegador(ColetorBase):
     # fora da tela (sem elas, uma página escondida para de se atualizar).
     OPCOES_SEMPRE = ["--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
                      "--disable-renderer-backgrounding"]
-    # Modo escondido: a janela abre fora da área da tela, então você não a vê.
-    OPCOES_ESCONDIDO = ["--window-position=-2400,-2400", "--window-size=1280,860"]
+    # Modo escondido: a janela abre fora da área da tela, então você não a vê, e sem som
+    # (a transmissão da mesa tem áudio, e escondida não haveria como silenciar).
+    OPCOES_ESCONDIDO = ["--window-position=-2400,-2400", "--window-size=1280,860", "--mute-audio"]
     # Modo com janela: posição explícita na tela. Sem isso o Chrome reabriria onde estava da
     # última vez, ou seja, escondido, se a vez anterior foi no modo escondido.
     OPCOES_JANELA = ["--window-position=40,40", "--window-size=1280,860"]
