@@ -4,7 +4,7 @@ Robô em Python que lê uma roleta europeia ao vivo, aplica três padrões popul
 
 **Resposta curta: não.** Os padrões acertam na mesma taxa de um giro qualquer, e a banca termina onde a matemática da roleta prevê.
 
-> **Demo online:** _cole aqui o link do seu app no Streamlit_
+> **Demo online:** https://robo-roleta-filipe.streamlit.app
 >
 > O robô só observa. Nenhuma aposta é feita: todos os valores são de uma banca fictícia.
 

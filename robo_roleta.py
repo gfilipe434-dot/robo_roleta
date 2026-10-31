@@ -2488,7 +2488,9 @@ def app_web() -> None:
     with st.sidebar:
         st.markdown('<div class="rr-marca"><i></i>Robô de Roleta</div>'
                     '<div class="rr-sub">Roleta europeia · banca fictícia</div>', unsafe_allow_html=True)
-        modo = st.radio("Modo de operação", [MODO_AUTO, MODO_MANUAL, MODO_SIM, MODO_BACKTEST], key="rr_modo")
+        # No PC abre na mesa automática; hospedado, abre no backtest (o que funciona online)
+        modo = st.radio("Modo de operação", [MODO_AUTO, MODO_MANUAL, MODO_SIM, MODO_BACKTEST],
+                        index=0 if no_meu_pc else 3, key="rr_modo")
         with st.expander("Ajustes da banca fictícia"):
             valor = st.number_input("Valor por alvo (R$)", min_value=1.0, max_value=100000.0, value=10.0, step=1.0, key="rr_valor")
             cobrir_zero = st.checkbox("Cobrir o zero", value=True, key="rr_zero_on")
@@ -2546,11 +2548,24 @@ def app_web() -> None:
                 f'<span class="rr-status {status[1]}"><i></i>{status[0]}</span></div>', unsafe_allow_html=True)
 
     if modo == MODO_BACKTEST:
-        _tela_backtest(st, sessao, ajustes)
+        demonstracao = None
+        if not no_meu_pc:
+            # Hospedado: o backtest de aceitação roda UMA vez no servidor e fica pronto para
+            # todos os visitantes (quem abrir o link já vê o resultado, sem esperar).
+            @st.cache_resource(show_spinner="Rodando o backtest de 1.000.000 de giros (só na primeira visita)...")
+            def backtest_demonstracao() -> dict:
+                inicio = time.time()
+                motor = executar_backtest(1_000_000, 42)
+                return {"giros": 1_000_000, "semente": 42, "motor": motor,
+                        "segundos": time.time() - inicio, "padrao": True}
+            demonstracao = backtest_demonstracao
+        _tela_backtest(st, sessao, ajustes, demonstracao)
         return
 
+    tem_playwright = importlib.util.find_spec("playwright") is not None
+
     # --------------------------- controles de cada modo -----------------------------
-    if modo == MODO_AUTO and importlib.util.find_spec("playwright") is None:
+    if modo == MODO_AUTO and not tem_playwright:
         # Hospedado na internet (ou sem Playwright instalado) não existe o seu Chrome para ler
         st.info("A leitura automática da mesa funciona só com o robô rodando no seu computador, "
                 "porque ela usa o seu Chrome. Instale com  py -m pip install playwright  e abra o painel "
@@ -2579,7 +2594,7 @@ def app_web() -> None:
 
     def painel_ao_vivo() -> None:
         sessao.tick()
-        if modo == MODO_AUTO:
+        if modo == MODO_AUTO and tem_playwright:
             _calibracao(st, sessao)
         motor = sessao.motor
         st.markdown(Html.cartoes(motor), unsafe_allow_html=True)
@@ -2678,7 +2693,7 @@ def _tela_manual(st, sessao: SessaoWeb) -> None:
             sessao.motor.processar(clicado, permitir_desfazer=True)
 
 
-def _tela_backtest(st, sessao: SessaoWeb, ajustes: dict) -> None:
+def _tela_backtest(st, sessao: SessaoWeb, ajustes: dict, demonstracao=None) -> None:
     """Backtest em massa com barra de progresso e conferência do teste de aceitação."""
     c1, c2, c3 = st.columns([2, 2, 1])
     giros = c1.number_input("Giros", min_value=1000, max_value=5_000_000, value=1_000_000, step=100_000, key="rr_bt_giros")
@@ -2696,6 +2711,8 @@ def _tela_backtest(st, sessao: SessaoWeb, ajustes: dict) -> None:
                            "padrao": all(getattr(padrao, k) == v for k, v in ajustes.items())}
 
     resultado = sessao.backtest
+    if not resultado and demonstracao is not None:
+        resultado = demonstracao()  # versão hospedada: mostra o teste de aceitação já pronto
     if not resultado:
         st.markdown('<div class="rr-calmo"><div><b>Rode um backtest</b><br><span>1.000.000 de giros com semente 42 '
                     'é o teste de aceitação: tem que dar 195.368 sinais e −R$ 90.804,00.</span></div></div>',
