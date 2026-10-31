@@ -2180,6 +2180,13 @@ class SessaoWeb:
                 historico = self.leitor.pegar_historico()
                 if historico and self.motor.total_giros == 0 and not self.motor.historico:
                     self.motor.carregar_historico(historico)
+                elif historico:
+                    # A faixa foi confirmada de novo no meio da sessão: os números que saíram
+                    # nesse intervalo são achados pela mesma "emenda" do leitor e processados.
+                    anterior = [g.numero for g in reversed(self.motor.historico)]
+                    atual = list(reversed(historico))
+                    for numero in reversed(ColetorNavegador.calcular_novos(anterior, atual) or []):
+                        self.motor.processar(numero)
                 for numero in self.leitor.pegar_numeros():
                     self.motor.processar(numero)
             if self.sim["rodando"]:
@@ -2531,25 +2538,30 @@ def app_web() -> None:
 
     sessao.trocar_modo(modo)
 
+    tem_playwright = importlib.util.find_spec("playwright") is not None
+
     # --------------------------- cabeçalho -----------------------------------------
-    if modo == MODO_AUTO and importlib.util.find_spec("playwright") is None:
-        status = ("Só no computador", "alerta")  # hospedado: não existe Chrome para ler a mesa
-    elif modo == MODO_AUTO:
-        fase = sessao.leitor.fase if sessao.leitor else None
-        status = {"iniciando": ("Conectando ao Chrome", "alerta"), "conectando": ("Conectando ao Chrome", "alerta"),
-                  "procurando": ("Procurando a faixa", "alerta"), "lendo": ("Lendo a mesa ao vivo", "on"),
-                  "erro": ("Erro na leitura", ""), "fim": ("Leitura encerrada", "")}.get(fase, ("Parado", ""))
-    elif modo == MODO_SIM:
-        status = ("Simulando", "on") if sessao.sim["rodando"] else ("Pausado", "")
-    elif modo == MODO_MANUAL:
-        status = ("Aguardando o próximo número", "on")
-    else:
-        status = ("Backtest", "")
-    st.markdown(f'<div class="rr-topo"><div><div class="rr-sub">{html.escape(modo)}</div>'
-                f'<div class="rr-titulo" role="heading" aria-level="1">Painel de sinais</div></div>'
-                f'<span class="rr-status {status[1]}"><i></i>{status[0]}</span></div>', unsafe_allow_html=True)
+    def cabecalho() -> None:
+        """Título e status. Nos modos ao vivo ele roda dentro do fragmento e se atualiza sozinho."""
+        if modo == MODO_AUTO and not tem_playwright:
+            status = ("Só no computador", "alerta")  # hospedado: não existe Chrome para ler a mesa
+        elif modo == MODO_AUTO:
+            fase = sessao.leitor.fase if sessao.leitor else None
+            status = {"iniciando": ("Conectando ao Chrome", "alerta"), "conectando": ("Conectando ao Chrome", "alerta"),
+                      "procurando": ("Procurando a faixa", "alerta"), "lendo": ("Lendo a mesa ao vivo", "on"),
+                      "erro": ("Erro na leitura", ""), "fim": ("Leitura encerrada", "")}.get(fase, ("Parado", ""))
+        elif modo == MODO_SIM:
+            status = ("Simulando", "on") if sessao.sim["rodando"] else ("Pausado", "")
+        elif modo == MODO_MANUAL:
+            status = ("Aguardando o próximo número", "on")
+        else:
+            status = ("Backtest", "")
+        st.markdown(f'<div class="rr-topo"><div><div class="rr-sub">{html.escape(modo)}</div>'
+                    f'<div class="rr-titulo" role="heading" aria-level="1">Painel de sinais</div></div>'
+                    f'<span class="rr-status {status[1]}"><i></i>{status[0]}</span></div>', unsafe_allow_html=True)
 
     if modo == MODO_BACKTEST:
+        cabecalho()
         demonstracao = None
         if not no_meu_pc:
             # Hospedado: o backtest de aceitação roda UMA vez no servidor e fica pronto para
@@ -2564,31 +2576,9 @@ def app_web() -> None:
         _tela_backtest(st, sessao, ajustes, demonstracao)
         return
 
-    tem_playwright = importlib.util.find_spec("playwright") is not None
-
-    # --------------------------- controles de cada modo -----------------------------
-    if modo == MODO_AUTO and not tem_playwright:
-        # Hospedado na internet (ou sem Playwright instalado) não existe o seu Chrome para ler
-        st.info("A leitura automática da mesa funciona só com o robô rodando no seu computador, "
-                "porque ela usa o seu Chrome. Instale com  py -m pip install playwright  e abra o painel "
-                "pelo atalho. Aqui você pode usar o modo manual, o simulador e o backtest.")
-    elif modo == MODO_AUTO:
-        c1, c2, c3 = st.columns([3, 1, 1])
-        url = c1.text_input("Endereço da mesa (opcional)", key="rr_url",
-                            placeholder="Deixe vazio se a mesa já estiver aberta no Chrome do robô")
-        if c2.button("Iniciar leitura", key="rr_ini_leitor", type="primary"):
-            sessao.iniciar_leitor(url.strip() or None)
-        if c3.button("Parar leitura", key="rr_par_leitor"):
-            sessao.parar_leitor()
-    elif modo == MODO_SIM:
-        c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-        velocidade = c1.radio("Velocidade", ["Normal (10 a 15 s)", "Acelerado (1 s)"], key="rr_vel", horizontal=True)
-        semente = c2.number_input("Semente (0 = aleatória)", min_value=0, max_value=10**9, value=0, step=1, key="rr_sem")
-        if c3.button("Iniciar", key="rr_ini_sim", type="primary"):
-            sessao.iniciar_sim(velocidade.startswith("Acelerado"), int(semente) or None)
-        if c4.button("Pausar", key="rr_pau_sim"):
-            sessao.sim["rodando"] = False
-    elif modo == MODO_MANUAL:
+    # O modo manual tem status fixo: cabeçalho e tabuleiro ficam fora do fragmento
+    if modo == MODO_MANUAL:
+        cabecalho()
         _tela_manual(st, sessao)
 
     # --------------------------- painel ao vivo (atualiza sozinho) ------------------
@@ -2596,6 +2586,13 @@ def app_web() -> None:
 
     def painel_ao_vivo() -> None:
         sessao.tick()
+        if modo in (MODO_AUTO, MODO_SIM):
+            # Cabeçalho e controles dentro do fragmento: o status acompanha a leitura em tempo real
+            cabecalho()
+            if modo == MODO_AUTO:
+                _controles_auto(st, sessao, tem_playwright)
+            else:
+                _controles_sim(st, sessao)
         if modo == MODO_AUTO and tem_playwright:
             _calibracao(st, sessao)
         motor = sessao.motor
@@ -2613,6 +2610,42 @@ def app_web() -> None:
     # O fragmento redesenha só esta parte a cada 1 s enquanto há leitura ou simulação,
     # sem recarregar a página inteira (a leitura em si acontece no processo separado).
     st.fragment(painel_ao_vivo, run_every=1.0 if ao_vivo else None)()
+
+
+def _controles_auto(st, sessao: SessaoWeb, tem_playwright: bool) -> None:
+    """Botões do modo automático. Durante a leitura só aparece 'Parar' (evita reiniciar sem querer)."""
+    if not tem_playwright:
+        # Hospedado na internet (ou sem Playwright instalado) não existe o seu Chrome para ler
+        st.info("A leitura automática da mesa funciona só com o robô rodando no seu computador, "
+                "porque ela usa o seu Chrome. Instale com  py -m pip install playwright  e abra o painel "
+                "pelo atalho. Aqui você pode usar o modo manual, o simulador e o backtest.")
+        return
+    c1, c2 = st.columns([4, 1])
+    if sessao.leitor_ativo():
+        c1.caption("Leitura ligada. Para trocar de mesa ou recomeçar, pare a leitura e inicie de novo.")
+        if c2.button("Parar leitura", key="rr_par_leitor"):
+            sessao.parar_leitor()
+            st.rerun()  # recarrega a página inteira para desligar a atualização automática
+    else:
+        url = c1.text_input("Endereço da mesa (opcional)", key="rr_url",
+                            placeholder="Deixe vazio se a mesa já estiver aberta no Chrome do robô")
+        if c2.button("Iniciar leitura", key="rr_ini_leitor", type="primary"):
+            sessao.iniciar_leitor(url.strip() or None)
+            st.rerun()  # recarrega a página inteira para ligar a atualização automática
+
+
+def _controles_sim(st, sessao: SessaoWeb) -> None:
+    """Botões do simulador: mostra Iniciar ou Pausar conforme o estado."""
+    c1, c2, c3 = st.columns([2, 2, 1])
+    velocidade = c1.radio("Velocidade", ["Normal (10 a 15 s)", "Acelerado (1 s)"], key="rr_vel", horizontal=True)
+    semente = c2.number_input("Semente (0 = aleatória)", min_value=0, max_value=10**9, value=0, step=1, key="rr_sem")
+    if sessao.sim["rodando"]:
+        if c3.button("Pausar", key="rr_pau_sim"):
+            sessao.sim["rodando"] = False
+            st.rerun()
+    elif c3.button("Iniciar", key="rr_ini_sim", type="primary"):
+        sessao.iniciar_sim(velocidade.startswith("Acelerado"), int(semente) or None)
+        st.rerun()
 
 
 def _calibracao(st, sessao: SessaoWeb) -> None:
