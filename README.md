@@ -1,14 +1,16 @@
-# Sinais de roleta funcionam?
+# Sinais de roleta e Bac Bo funcionam?
 
-Robô em Python que lê uma roleta europeia ao vivo, aplica três padrões populares de "sinais" e confere cada entrada sozinho numa banca fictícia. Os mesmos padrões foram testados em 1 milhão de giros simulados.
+Robô em Python que acompanha uma roleta europeia e uma mesa de Bac Bo, aplica padrões populares de "sinais" e confere cada entrada sozinho numa banca fictícia. Os mesmos padrões foram testados em 1 milhão de rodadas simuladas de cada jogo.
 
-**Resposta curta: não.** Os padrões acertam na mesma taxa de um giro qualquer, e a banca termina onde a matemática da roleta prevê.
+**Resposta curta: não.** Os padrões acertam na mesma taxa de uma rodada qualquer, e a banca termina onde a matemática de cada jogo prevê.
 
 > **Demo online:** https://robo-roleta-filipe.streamlit.app
 >
 > O robô só observa. Nenhuma aposta é feita: todos os valores são de uma banca fictícia.
 
-## Os três padrões testados
+## Roleta
+
+### Os três padrões testados
 
 | Padrão | Gatilho | Entrada sugerida | Chance real do alvo | Acerto para empatar |
 |---|---|---|---|---|
@@ -16,7 +18,7 @@ Robô em Python que lê uma roleta europeia ao vivo, aplica três padrões popul
 | Dúzia | 3 números seguidos na mesma dúzia | as outras duas dúzias | 64,9% | 66,7% |
 | Coluna | 3 números seguidos na mesma coluna | as outras duas colunas | 64,9% | 66,7% |
 
-## Resultado do backtest (1.000.000 de giros, semente 42)
+### Resultado do backtest (1.000.000 de giros, semente 42)
 
 | Padrão | Sinais | Acerto | Chance real | Resultado |
 |---|---|---|---|---|
@@ -27,13 +29,46 @@ Robô em Python que lê uma roleta europeia ao vivo, aplica três padrões popul
 
 A vantagem da casa na roleta europeia é 1/37 = 2,70%. O resultado real ficou dentro do previsto pela matemática.
 
+## Bac Bo
+
+Cada lado (Player e Banker) joga dois dados e ganha a maior soma. Player e Banker ganham em 575 das 1.296 combinações de dados (44,37% cada) e o empate em 146 (11,27%). Player e Banker pagam 1:1 e devolvem 90% da entrada no empate; o empate paga de 4:1 a 88:1, conforme a soma.
+
+### Os seis padrões prontos
+
+| Padrão | Gatilho | Entrada sugerida | Chance real do alvo | Acerto para empatar |
+|---|---|---|---|---|
+| 3 iguais → lado oposto | 3 Player (ou Banker) seguidos | o outro lado | 44,4% | 44,9% |
+| Alternância → continua | P B P B | continua alternando | 44,4% | 44,9% |
+| 2 iguais → repete | 2 iguais seguidos | o mesmo lado | 44,4% | 44,9% |
+| Empate → empate | saiu empate | empate | 11,3% | 11,8% |
+| Duplas → volta o primeiro | P P B B | o primeiro lado | 44,4% | 44,9% |
+| 4 iguais → surfa | 4 iguais seguidos | o mesmo lado | 44,4% | 44,9% |
+
+Além desses, o painel aceita **padrões cadastrados por você**, um por linha (`PPB -> P`, `BBBB -> P`, `EP -> E`), sem mexer no código.
+
+### Resultado do backtest (1.000.000 de rodadas, semente 42)
+
+| Padrão | Sinais | Acerto | Chance real | Resultado |
+|---|---|---|---|---|
+| 3 iguais → lado oposto | 97.190 | 44,3% | 44,4% | −R$ 13.475 |
+| Alternância → continua | 43.146 | 44,2% | 44,4% | −R$ 9.497 |
+| 2 iguais → repete | 218.961 | 44,4% | 44,4% | −R$ 32.828 |
+| Empate → empate | 112.920 | 11,4% | 11,3% | −R$ 37.040 |
+| Duplas → volta o primeiro | 77.262 | 44,3% | 44,4% | −R$ 11.931 |
+| 4 iguais → surfa | 43.040 | 44,4% | 44,4% | −R$ 8.951 |
+| **Total** | **592.519** | | | **−R$ 113.722** (−1,78% do apostado) |
+
+Entradas de R$ 10 com R$ 1 de proteção no empate. A vantagem da casa no Bac Bo é 1,13% em Player/Banker e 4,48% no empate; a matemática previa −R$ 126.028, e o resultado ficou dentro da variação normal.
+
 ## Funcionalidades
 
 - **Painel visual (Streamlit):** últimas pedras com as cores da mesa, alerta de entrada, desempenho por padrão e gráfico da banca contra a curva esperada.
-- **4 modos:** leitura automática da mesa ao vivo (Playwright, só no computador), entrada manual com tabuleiro clicável, simulador ao vivo e backtest em massa.
+- **Dois jogos no mesmo painel:** roleta europeia e Bac Bo, com sessões separadas (trocar de jogo não apaga nada).
+- **4 modos:** leitura automática da mesa ao vivo (Playwright, só no computador; no Bac Bo, em preparação), entrada manual com tabuleiro clicável, simulador ao vivo e backtest em massa.
+- **Padrões do Bac Bo configuráveis:** liga e desliga os prontos e cadastra os seus em texto simples; ficam salvos no computador.
 - **Leitura ao vivo robusta:** acha a faixa de resultados pelo atributo `data-role="number-N"` (inclusive em iframes aninhados e shadow DOM), confirma cada mudança com duas leituras, recupera giros perdidos e reencontra a faixa se a página recarregar.
 - **Modo terminal completo**, com menu, para quem prefere rodar sem navegador.
-- **Testes de aceitação reproduzíveis:** `--backtest 1000000 --semente 42` sempre dá 195.368 sinais e −R$ 90.804,00.
+- **Testes de aceitação reproduzíveis:** `--backtest 1000000 --semente 42` sempre dá 195.368 sinais e −R$ 90.804,00 na roleta; `--jogo bacbo --backtest 1000000 --semente 42` sempre dá 592.519 sinais e −R$ 113.722,00 no Bac Bo.
 
 ## Arquitetura
 
@@ -45,6 +80,9 @@ MonitorRoleta / MotorWeb ──► BancaFicticia      (liquida os sinais do giro
         │                ──► EstrategiaRoleta   (procura novos sinais)
         │                ──► Painel / tela      (mostra tudo)
         └─ histórico: deque(maxlen=20)
+
+Bac Bo: RodadaBacBo ──► MotorBacBo ──► BancaBacBo (pagamentos reais do Bac Bo)
+                                   └─► EstrategiaBacBo (padrões prontos + os seus)
 ```
 
 ## Como rodar no computador
@@ -57,6 +95,7 @@ python robo_roleta.py              # menu com todos os modos (terminal)
 python robo_roleta.py --web        # painel visual no navegador, rodando escondido
 streamlit run robo_roleta.py       # painel visual (forma direta)
 python robo_roleta.py --backtest 1000000 --semente 42   # teste de aceitação
+python robo_roleta.py --jogo bacbo --backtest 1000000 --semente 42   # teste do Bac Bo
 ```
 
 ## Tecnologias

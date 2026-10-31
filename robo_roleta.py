@@ -1567,6 +1567,8 @@ def ler_argumentos(argv: List[str]) -> argparse.Namespace:
                         help="cria na Área de Trabalho um atalho que abre o painel direto (Windows)")
     parser.add_argument("--atualizar", action="store_true",
                         help="baixa a versão mais nova do robô no GitHub e troca este arquivo")
+    parser.add_argument("--jogo", choices=["roleta", "bacbo"], default="roleta",
+                        help="jogo analisado (padrão: roleta). No terminal, o Bac Bo tem o --backtest")
     parser.add_argument("--leitor-json", action="store_true", help=argparse.SUPPRESS)  # usado pelo painel
     parser.add_argument("--escondido", action="store_true",
                         help="no modo --navegador, abre o Chrome do robô sem janela visível")
@@ -1632,6 +1634,9 @@ def pausar_antes_de_fechar() -> None:
 
 def rodar(args: argparse.Namespace) -> None:
     """Monta as peças conforme o modo escolhido e liga o motor."""
+    if args.jogo == "bacbo":
+        rodar_bacbo_terminal(args)
+        return
     modo_backtest = args.backtest is not None
 
     # --- Monta a configuração conforme o modo escolhido -----------------------------
@@ -2248,7 +2253,8 @@ class LeitorProcesso:
             self.proc.terminate()
 
 
-CONFIG_PAINEL_PADRAO = {"url": "", "escondido": False, "auto_confirmar": True, "iniciar_sozinho": False}
+CONFIG_PAINEL_PADRAO = {"url": "", "escondido": False, "auto_confirmar": True, "iniciar_sozinho": False,
+                        "bacbo_padroes_desligados": [], "bacbo_padroes_extras": ""}
 
 
 def _arquivo_config_painel() -> str:
@@ -2266,9 +2272,11 @@ def ler_config_painel() -> dict:
 
 
 def salvar_config_painel(dados: dict) -> None:
+    """Grava só as chaves recebidas e mantém as outras (ex.: salvar a mesa não apaga os padrões do Bac Bo)."""
     try:
+        atual = ler_config_painel()
         with open(_arquivo_config_painel(), "w", encoding="utf-8") as arq:
-            json.dump({**CONFIG_PAINEL_PADRAO, **dados}, arq, ensure_ascii=False, indent=2)
+            json.dump({**atual, **dados}, arq, ensure_ascii=False, indent=2)
     except OSError:
         pass  # sem permissão de escrita: o painel funciona, só não lembra das escolhas
 
@@ -2286,6 +2294,7 @@ class SessaoWeb:
         self.backtest: Optional[dict] = None
         self.aviso: Optional[str] = None
         self.auto_iniciado = False  # "Começar a ler quando o painel abrir" já foi feito?
+        self.bacbo = None  # SessaoBacBo, criada na primeira vez que o Bac Bo é aberto
 
     # --- sessão e modo -------------------------------------------------------------
     def nova_sessao(self, config: Config) -> None:
@@ -2298,6 +2307,8 @@ class SessaoWeb:
             if modo != self.modo:
                 self.parar_leitor()
                 self.sim["rodando"] = False
+                if getattr(self, "bacbo", None) is not None:
+                    self.bacbo.sim["rodando"] = False
                 self.modo = modo
 
     # --- leitura automática --------------------------------------------------------
@@ -2356,7 +2367,7 @@ class Html:
     CORES = {"bg": "#0b0d12", "surface": "#131720", "surface2": "#1a1f2b", "line": "#262c3a",
              "ink": "#eef0f4", "ink2": "#aab1be", "muted": "#7d8594", "red": "#ff2d4b",
              "black": "#16181e", "green": "#14d27a", "blue": "#3d8bff", "gold": "#e8b84a",
-             "good": "#2fd17a", "bad": "#ff4d5e"}
+             "good": "#2fd17a", "bad": "#ff4d5e", "player": "#2f6fff"}
 
     @classmethod
     def css(cls) -> str:
@@ -2447,7 +2458,22 @@ class Html:
             ".rr-selo.nao{background:rgba(255,77,94,.12);color:var(--rr-bad);border:1px solid rgba(255,77,94,.35);}",
             ".rr-marca{font-family:var(--rr-display);font-weight:800;font-size:1.25rem;letter-spacing:-.02em;color:var(--rr-ink);display:flex;align-items:center;gap:10px;margin:4px 0 2px;}",
             ".rr-marca i{width:14px;height:14px;border-radius:50%;background:conic-gradient(var(--rr-red) 0 33%,var(--rr-black) 0 66%,var(--rr-green) 0);box-shadow:0 0 10px rgba(255,45,75,.5);display:inline-block;}",
+            # Bac Bo: pedras azul (Player), vermelha (Banker) e dourada (Empate), com a soma vencedora
+            ".bb-chip{width:40px;height:40px;border-radius:50%;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;flex:none;font-family:var(--rr-mono);font-weight:700;font-size:.95rem;line-height:1;color:#fff;}",
+            ".stApp .bb-chip small,.bb-chip small{font-size:.6rem;font-weight:600;opacity:.9;margin-top:2px;color:inherit!important;}",
+            f".bb-chip.p{{background:radial-gradient(circle at 35% 30%,#7aa5ff,{c['player']} 60%);box-shadow:0 0 12px rgba(47,111,255,.5);}}",
+            ".bb-chip.b{background:radial-gradient(circle at 35% 30%,#ff5a70,var(--rr-red) 60%);box-shadow:0 0 12px rgba(255,45,75,.5);}",
+            ".bb-chip.e{background:radial-gradient(circle at 35% 30%,#ffe2a1,var(--rr-gold) 60%);box-shadow:0 0 12px rgba(232,184,74,.5);color:#1a1300;}",
+            ".bb-chip.pq{width:30px;height:30px;font-size:.78rem;}.bb-chip.pq small{display:none;}",
+            ".bb-chip.nova{width:52px;height:52px;font-size:1.15rem;outline:2px solid var(--rr-ink);outline-offset:3px;}",
+            f".rr-marca.bb i{{background:conic-gradient({c['player']} 0 45%,var(--rr-red) 0 90%,var(--rr-gold) 0);box-shadow:0 0 10px rgba(47,111,255,.5);}}",
+            ".st-key-bb_p button,.st-key-bb_b button,.st-key-bb_e button{width:100%;min-height:64px;border:0!important;}",
+            ".st-key-bb_p button p,.st-key-bb_b button p,.st-key-bb_e button p{font-family:var(--rr-display)!important;font-weight:800!important;font-size:1.15rem!important;letter-spacing:.04em;color:#fff!important;}",
+            f".st-key-bb_p button{{background:{c['player']}!important;}}.st-key-bb_b button{{background:var(--rr-red)!important;}}",
+            ".st-key-bb_e button{background:var(--rr-gold)!important;}.st-key-bb_e button p{color:#1a1300!important;}",
+            ".rr-aviso{font-family:var(--rr-mono);font-size:.78rem;color:var(--rr-gold);margin:-6px 0 14px;}",
             "@media (max-width:900px){.rr-cartoes{grid-template-columns:repeat(2,minmax(0,1fr));}.rr-alerta .grade{grid-template-columns:1fr;}}",
+            "@media (max-width:520px){.rr-cartao{padding:14px;}.rr-cartao .v{font-size:1.3rem;white-space:normal;overflow:visible;}}",
             "@media (prefers-reduced-motion:reduce){.rr-alerta,.rr-status.on i{animation:none;}}",
         ]
         # tabuleiro do modo manual: cada botão com a cor do número (classe st-key-<key> do Streamlit)
@@ -2572,7 +2598,8 @@ class Html:
                 f"Com poucos sinais o acerto oscila muito; com muitos, ele encosta na chance real.</div></div>")
 
     @staticmethod
-    def grafico_curva(curva: List[Tuple[int, float, float]], titulo: str, rotulo_x: str = "giros") -> str:
+    def grafico_curva(curva: List[Tuple[int, float, float]], titulo: str, rotulo_x: str = "giros",
+                      previsto: str = "Previsto pela matemática (−1/37 do apostado)") -> str:
         if len(curva) < 2:
             return (f'<div class="rr-bloco"><div class="rr-h">{titulo}</div>'
                     '<span class="rr-nota">O gráfico aparece depois do primeiro sinal conferido.</span></div>')
@@ -2610,7 +2637,7 @@ class Html:
             partes.append(f'<circle cx="{sx(ult[0]):.1f}" cy="{sy(ult[idx]):.1f}" r="5" fill="{cor}" stroke="{Html.CORES["surface"]}" stroke-width="2"/>')
         partes.append("</svg>")
         legenda = (f'<div class="rr-legenda"><span><i style="background:{Html.CORES["blue"]}"></i>Banca fictícia (resultado acumulado)</span>'
-                   f'<span><i style="background:#8b93a3"></i>Previsto pela matemática (−1/37 do apostado)</span></div>')
+                   f'<span><i style="background:#8b93a3"></i>{html.escape(previsto)}</span></div>')
         return f'<div class="rr-bloco rr-graf"><div class="rr-h">{titulo}</div>{legenda}{"".join(partes)}</div>'
 
 
@@ -2646,30 +2673,43 @@ def app_web() -> None:
 
     # --------------------------- barra lateral -------------------------------------
     with st.sidebar:
-        st.markdown('<div class="rr-marca"><i></i>Robô de Roleta</div>'
-                    '<div class="rr-sub">Roleta europeia · banca fictícia</div>', unsafe_allow_html=True)
+        marca = st.container()  # a marca fica no topo, mas depende do jogo escolhido logo abaixo
+        jogo = st.radio("Jogo", [JOGO_ROLETA, JOGO_BACBO], key="rr_jogo", horizontal=True)
+        e_bacbo = jogo == JOGO_BACBO
+        marca.markdown(f'<div class="rr-marca{" bb" if e_bacbo else ""}"><i></i>'
+                       f'{"Robô de Bac Bo" if e_bacbo else "Robô de Roleta"}</div>'
+                       f'<div class="rr-sub">{"Bac Bo (Evolution)" if e_bacbo else "Roleta europeia"} · banca fictícia</div>',
+                       unsafe_allow_html=True)
         # No PC abre na mesa automática; hospedado, abre no backtest (o que funciona online)
         modo = st.radio("Modo de operação", [MODO_AUTO, MODO_MANUAL, MODO_SIM, MODO_BACKTEST],
                         index=0 if no_meu_pc else 3, key="rr_modo")
-        with st.expander("Ajustes da banca fictícia"):
-            valor = st.number_input("Valor por alvo (R$)", min_value=1.0, max_value=100000.0, value=10.0, step=1.0, key="rr_valor")
-            cobrir_zero = st.checkbox("Cobrir o zero", value=True, key="rr_zero_on")
-            valor_zero = st.number_input("Valor no zero (R$)", min_value=0.0, max_value=100000.0, value=1.0, step=0.5, key="rr_zero_valor")
-            banca_ini = st.number_input("Banca inicial (R$)", min_value=1.0, max_value=10_000_000.0, value=1000.0, step=100.0, key="rr_banca")
-            st.caption("Os valores padrão são os dos testes de aceitação.")
-        ajustes = dict(valor_por_alvo=float(valor), protecao_zero=bool(cobrir_zero),
-                       valor_protecao_zero=float(valor_zero), banca_inicial=float(banca_ini))
-        try:
-            config_tela = Config(**ajustes)
-        except ValueError as erro:
-            st.error(f"Ajuste inválido: {erro}")
-            config_tela = Config()
-        mudou = any(getattr(sessao.config, k) != v for k, v in ajustes.items())
+        bacbo = obter_bacbo(sessao, no_meu_pc) if e_bacbo else None
+        if bacbo is not None:
+            ajustes, config_tela, mudou = _ajustes_bacbo(st, bacbo)
+            _padroes_bacbo(st, bacbo)
+        else:
+            with st.expander("Ajustes da banca fictícia"):
+                valor = st.number_input("Valor por alvo (R$)", min_value=1.0, max_value=100000.0, value=10.0, step=1.0, key="rr_valor")
+                cobrir_zero = st.checkbox("Cobrir o zero", value=True, key="rr_zero_on")
+                valor_zero = st.number_input("Valor no zero (R$)", min_value=0.0, max_value=100000.0, value=1.0, step=0.5, key="rr_zero_valor")
+                banca_ini = st.number_input("Banca inicial (R$)", min_value=1.0, max_value=10_000_000.0, value=1000.0, step=100.0, key="rr_banca")
+                st.caption("Os valores padrão são os dos testes de aceitação.")
+            ajustes = dict(valor_por_alvo=float(valor), protecao_zero=bool(cobrir_zero),
+                           valor_protecao_zero=float(valor_zero), banca_inicial=float(banca_ini))
+            try:
+                config_tela = Config(**ajustes)
+            except ValueError as erro:
+                st.error(f"Ajuste inválido: {erro}")
+                config_tela = Config()
+            mudou = any(getattr(sessao.config, k) != v for k, v in ajustes.items())
         if modo != MODO_BACKTEST:
             if mudou:
                 st.caption("Os ajustes novos valem a partir de uma nova sessão.")
             if st.button("Nova sessão", key="rr_nova", type="primary" if mudou else "secondary"):
-                sessao.nova_sessao(config_tela)
+                if bacbo is not None:
+                    bacbo.nova_sessao(config_tela)
+                else:
+                    sessao.nova_sessao(config_tela)
         st.markdown('<div class="rr-nota">O robô só observa. Nenhuma aposta é feita: '
                     'todos os valores são de uma banca fictícia.</div>', unsafe_allow_html=True)
         # Só no seu PC: hospedado, um visitante não pode desligar o site nem trocar o código
@@ -2707,7 +2747,12 @@ def app_web() -> None:
         threading.Timer(1.5, lambda: os._exit(0)).start()  # dá tempo da mensagem chegar ao navegador
         st.stop()
 
-    sessao.trocar_modo(modo)
+    # Trocar de jogo conta como trocar de modo: pausa a leitura e o simulador (as sessões ficam guardadas)
+    sessao.trocar_modo(f"{jogo} · {modo}")
+
+    if bacbo is not None:
+        app_bacbo(st, bacbo, modo, no_meu_pc, config_tela)
+        return
 
     tem_playwright = importlib.util.find_spec("playwright") is not None
 
@@ -2974,6 +3019,846 @@ def _tela_backtest(st, sessao: SessaoWeb, ajustes: dict, demonstracao=None) -> N
                     unsafe_allow_html=True)
     st.markdown(Html.grafico_curva(motor.curva, "Banca no backtest"), unsafe_allow_html=True)
     st.markdown(Html.tabela_padroes(motor.banca, "Desempenho por padrão no backtest"), unsafe_allow_html=True)
+
+
+# ===================================================================================
+# 11) BAC BO (Evolution)
+# -----------------------------------------------------------------------------------
+# Regras: 2 dados para o Player e 2 para o Banker; ganha a maior soma; somas iguais = empate.
+# Pagamentos: Player e Banker pagam 1:1. No empate, quem apostou em Player ou Banker recebe
+# 90% de volta. O empate paga conforme a soma: 2/12 = 88:1, 3/11 = 25:1, 4/10 = 10:1,
+# 5/9 = 6:1 e 6/7/8 = 4:1.
+# Matemática: Player e Banker ganham em 575 de 1.296 combinações de dados (44,37%) cada;
+# o empate, em 146 de 1.296 (11,27%). Vantagem da casa: 1,13% em Player/Banker e 4,48% no empate.
+# ===================================================================================
+PLAYER, BANKER, EMPATE = "P", "B", "E"
+NOMES_LADO = {PLAYER: "PLAYER", BANKER: "BANKER", EMPATE: "EMPATE"}
+OPOSTO = {PLAYER: BANKER, BANKER: PLAYER}
+PAGA_EMPATE = {2: 88, 12: 88, 3: 25, 11: 25, 4: 10, 10: 10, 5: 6, 9: 6, 6: 4, 7: 4, 8: 4}
+DEVOLUCAO_NO_EMPATE = 0.9  # Player/Banker recebem 90% de volta quando dá empate
+CHANCE_LADO = 575 / 1296
+CHANCE_EMPATE = 146 / 1296
+RETORNO_MEDIO_EMPATE = 1238 / 146  # quanto volta, em média, cada R$ 1 num empate que acerta
+VANTAGEM_LADO = 1 - (575 * 2 + 146 * DEVOLUCAO_NO_EMPATE) / 1296  # 1,13%
+VANTAGEM_EMPATE = 1 - 1238 / 1296                                 # 4,48%
+MATEMATICA_BACBO = {
+    # acerto mínimo do lado: 2w - 1 + 0,9t = 0  ->  w = (1 - 0,9t) / 2
+    "lado": {"chance_teorica": CHANCE_LADO, "acerto_minimo": (1 - DEVOLUCAO_NO_EMPATE * CHANCE_EMPATE) / 2},
+    "empate": {"chance_teorica": CHANCE_EMPATE, "acerto_minimo": 1 / RETORNO_MEDIO_EMPATE},
+}
+
+
+@dataclass
+class ConfigBacBo:
+    valor_por_alvo: float = 10.0
+    protecao_empate: bool = True       # cobrir o empate junto com as apostas em Player/Banker?
+    valor_protecao_empate: float = 1.0
+    banca_inicial: float = 1000.0
+    tamanho_historico: int = 30
+
+    def __post_init__(self) -> None:
+        if self.valor_por_alvo <= 0 or self.valor_protecao_empate < 0 or self.banca_inicial <= 0:
+            raise ValueError("os valores da banca do Bac Bo precisam ser positivos.")
+
+
+@dataclass(frozen=True)
+class RodadaBacBo:
+    """Uma rodada: quem ganhou e as somas (quando conhecidas)."""
+
+    resultado: str                 # "P", "B" ou "E"
+    soma_player: Optional[int]
+    soma_banker: Optional[int]
+    horario: datetime
+
+    @classmethod
+    def dos_dados(cls, p1: int, p2: int, b1: int, b2: int, horario: Optional[datetime] = None) -> "RodadaBacBo":
+        if any(not 1 <= d <= 6 for d in (p1, p2, b1, b2)):
+            raise ValueError("dado inválido (tem que ser de 1 a 6)")
+        sp, sb = p1 + p2, b1 + b2
+        resultado = PLAYER if sp > sb else (BANKER if sb > sp else EMPATE)
+        return cls(resultado, sp, sb, horario or datetime.now())
+
+    @classmethod
+    def do_resultado(cls, resultado: str, soma: Optional[int] = None,
+                     horario: Optional[datetime] = None) -> "RodadaBacBo":
+        """Quando só se sabe quem ganhou (modo manual): 'soma' é a soma vencedora, ou a do empate."""
+        if resultado not in (PLAYER, BANKER, EMPATE):
+            raise ValueError(f"resultado inválido: {resultado!r}")
+        if soma is not None and not 2 <= soma <= 12:
+            raise ValueError("a soma de dois dados vai de 2 a 12")
+        sp = soma if resultado in (PLAYER, EMPATE) else None
+        sb = soma if resultado in (BANKER, EMPATE) else None
+        return cls(resultado, sp, sb, horario or datetime.now())
+
+    @property
+    def soma_vencedora(self) -> Optional[int]:
+        return self.soma_banker if self.resultado == BANKER else self.soma_player
+
+    @property
+    def paga_empate(self) -> int:
+        """Quanto o empate paga nesta rodada. Sem a soma, usa o mínimo (4:1), por segurança."""
+        return PAGA_EMPATE.get(self.soma_player, 4) if self.resultado == EMPATE else 0
+
+
+@dataclass
+class PadraoBacBo:
+    """Um padrão: olha os resultados (do mais antigo para o mais novo) e devolve o alvo ou None."""
+
+    chave: str
+    nome: str
+    descricao: str
+    detectar: object  # função: List[str] -> Optional[str]
+
+    @property
+    def tipo(self) -> str:
+        return "empate" if self.chave in ("emp",) or self.chave.endswith(">E") else "lado"
+
+
+def _sequencia_final(res: List[str]) -> int:
+    """Quantos resultados iguais seguidos no fim (o empate quebra a sequência)."""
+    if not res or res[-1] == EMPATE:
+        return 0
+    n = 1
+    while n < len(res) and res[-1 - n] == res[-1]:
+        n += 1
+    return n
+
+
+def _alternancia_final(res: List[str]) -> int:
+    """Tamanho da alternância no fim, ex.: P B P B = 4 (o empate quebra)."""
+    if not res or res[-1] == EMPATE:
+        return 0
+    n = 1
+    while n < len(res) and res[-1 - n] != EMPATE and res[-1 - n] != res[-n]:
+        n += 1
+    return n
+
+
+def _duplas_2x2(res: List[str]) -> Optional[str]:
+    """P P B B (duas duplas): aposta que a próxima dupla começa pelo primeiro lado."""
+    if len(res) < 4 or EMPATE in res[-4:]:
+        return None
+    a, b, c, d = res[-4:]
+    if a == b and c == d and a != c and _sequencia_final(res) == 2:
+        return a
+    return None
+
+
+# Os padrões prontos. Cada sequência gera uma entrada só (dispara no tamanho exato).
+PADROES_BACBO: List[PadraoBacBo] = [
+    PadraoBacBo("rep3", "3 iguais → lado oposto", "Três Player (ou Banker) seguidos: aposta no outro lado.",
+                lambda r: OPOSTO[r[-1]] if _sequencia_final(r) == 3 else None),
+    PadraoBacBo("alt4", "Alternância → continua", "Player, Banker, Player, Banker: aposta que continua alternando.",
+                lambda r: OPOSTO[r[-1]] if _alternancia_final(r) == 4 else None),
+    PadraoBacBo("rep2", "2 iguais → repete", "Dois iguais seguidos: aposta que repete (segue a tendência).",
+                lambda r: r[-1] if _sequencia_final(r) == 2 else None),
+    PadraoBacBo("emp", "Empate → empate", "Saiu empate: aposta em empate na rodada seguinte.",
+                lambda r: EMPATE if r and r[-1] == EMPATE else None),
+    PadraoBacBo("2x2", "Duplas (PPBB) → volta o primeiro", "Duas duplas seguidas: aposta que a próxima começa pelo primeiro lado.",
+                _duplas_2x2),
+    PadraoBacBo("surf4", "4 iguais → surfa a sequência", "Quatro iguais seguidos: aposta que a sequência continua.",
+                lambda r: r[-1] if _sequencia_final(r) == 4 else None),
+]
+
+
+def ler_padroes_personalizados(texto: str) -> Tuple[List[PadraoBacBo], List[str]]:
+    """
+    Lê padrões escritos por você, um por linha, no formato SEQUÊNCIA -> ALVO
+    (P = Player, B = Banker, E = Empate). Exemplos:  PPB -> P   |   BBBB -> P   |   EP -> E
+    Um padrão dispara sempre que as últimas rodadas forem exatamente aquela sequência.
+    Devolve (padrões válidos, mensagens de erro).
+    """
+    padroes: List[PadraoBacBo] = []
+    erros: List[str] = []
+    vistos = set()
+    for numero_linha, linha in enumerate(texto.splitlines(), start=1):
+        limpa = linha.strip().upper().replace(" ", "")
+        if not limpa or limpa.startswith("#"):
+            continue
+        for separador in ("->", "→", "=>", "=", ">"):
+            if separador in limpa:
+                sequencia, alvo = limpa.split(separador, 1)
+                break
+        else:
+            erros.append(f"linha {numero_linha}: falta a seta (exemplo: PPB -> P)")
+            continue
+        if not sequencia or len(sequencia) > 12 or any(c not in "PBE" for c in sequencia) or alvo not in ("P", "B", "E"):
+            erros.append(f"linha {numero_linha}: use só P, B e E, com até 12 letras (exemplo: PPB -> P)")
+            continue
+        chave = f"c:{sequencia}>{alvo}"
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        padroes.append(PadraoBacBo(
+            chave, f"{sequencia} → {alvo}",
+            f"Sempre que as últimas rodadas forem {sequencia}, aposta em {NOMES_LADO[alvo]}.",
+            lambda r, s=list(sequencia), a=alvo: a if r[-len(s):] == s else None))
+    return padroes, erros
+
+
+@dataclass
+class SinalBacBo:
+    chave: str
+    nome: str
+    alvo: str            # "P", "B" ou "E"
+    rodada_origem: int
+
+    @property
+    def tipo(self) -> str:
+        return "empate" if self.alvo == EMPATE else "lado"
+
+
+@dataclass
+class ResultadoBacBo:
+    sinal: SinalBacBo
+    rodada: RodadaBacBo
+    status: str          # "GREEN", "EMPATE" ou "LOSS"
+    total_apostado: float
+    lucro: float
+
+
+class EstrategiaBacBo:
+    """Roda os padrões ativos sobre o histórico e devolve os sinais para a próxima rodada."""
+
+    def __init__(self, padroes: List[PadraoBacBo]) -> None:
+        self.padroes = list(padroes)
+
+    def analisar(self, historico: Deque[RodadaBacBo], numero_rodada: int) -> List[SinalBacBo]:
+        resultados = [r.resultado for r in historico]
+        sinais: List[SinalBacBo] = []
+        for padrao in self.padroes:
+            try:
+                alvo = padrao.detectar(resultados)
+            except Exception as erro:  # um padrão com defeito não derruba os outros
+                exibir(f"⚠️  Erro no padrão {padrao.nome}: {erro}")
+                continue
+            if alvo:
+                sinais.append(SinalBacBo(padrao.chave, padrao.nome, alvo, numero_rodada))
+        return sinais
+
+
+class BancaBacBo:
+    """Liquida cada sinal na rodada seguinte com os pagamentos reais do Bac Bo."""
+
+    def __init__(self, config: ConfigBacBo) -> None:
+        self.config = config
+        self.saldo = config.banca_inicial
+        self.menor_saldo = config.banca_inicial
+        self.estatisticas: Dict[str, EstatisticaPadrao] = {}
+        self.nomes: Dict[str, str] = {}
+        self.tipos: Dict[str, str] = {}
+        self.apostado_lado = 0.0
+        self.apostado_empate = 0.0
+
+    def liquidar(self, sinal: SinalBacBo, rodada: RodadaBacBo) -> ResultadoBacBo:
+        ficha = self.config.valor_por_alvo
+        if sinal.alvo == EMPATE:
+            apostado, acertou = ficha, rodada.resultado == EMPATE
+            self.apostado_empate += ficha
+            retorno = ficha * (1 + rodada.paga_empate) if acertou else 0.0
+            status = "GREEN" if acertou else "LOSS"
+        else:
+            protecao = self.config.valor_protecao_empate if self.config.protecao_empate else 0.0
+            apostado, acertou = ficha + protecao, rodada.resultado == sinal.alvo
+            self.apostado_lado += ficha
+            self.apostado_empate += protecao
+            if acertou:
+                retorno = ficha * 2
+            elif rodada.resultado == EMPATE:
+                retorno = ficha * DEVOLUCAO_NO_EMPATE + protecao * (1 + rodada.paga_empate)
+            else:
+                retorno = 0.0
+            status = "GREEN" if acertou else ("EMPATE" if rodada.resultado == EMPATE else "LOSS")
+        lucro = retorno - apostado
+
+        est = self.estatisticas.setdefault(sinal.chave, EstatisticaPadrao())
+        self.nomes[sinal.chave], self.tipos[sinal.chave] = sinal.nome, sinal.tipo
+        est.sinais += 1
+        est.apostado += apostado
+        est.lucro += lucro
+        if status == "GREEN":
+            est.greens += 1
+        elif status == "EMPATE" and lucro > 0:
+            est.greens_protecao += 1
+        else:
+            est.losses += 1
+        self.saldo += lucro
+        self.menor_saldo = min(self.menor_saldo, self.saldo)
+        return ResultadoBacBo(sinal, rodada, status, apostado, lucro)
+
+    def total(self) -> EstatisticaPadrao:
+        soma = EstatisticaPadrao()
+        for est in self.estatisticas.values():
+            for campo in ("sinais", "greens", "greens_protecao", "losses", "apostado", "lucro"):
+                setattr(soma, campo, getattr(soma, campo) + getattr(est, campo))
+        return soma
+
+    def esperado(self) -> float:
+        """Quanto a matemática prevê perder com o que foi apostado (em cada tipo de aposta)."""
+        return -(self.apostado_lado * VANTAGEM_LADO + self.apostado_empate * VANTAGEM_EMPATE)
+
+
+class SimuladorBacBo:
+    """Rola quatro dados de verdade (cada face com a mesma chance), como a mesa."""
+
+    def __init__(self, semente: Optional[int] = None) -> None:
+        self._rng = random.Random(semente)
+
+    def proxima(self) -> RodadaBacBo:
+        return RodadaBacBo.dos_dados(*(self._rng.randint(1, 6) for _ in range(4)))
+
+
+class MotorBacBo:
+    """O mesmo ciclo do motor da roleta: registra, liquida os sinais anteriores, procura novos."""
+
+    LIMITE_FEED = 300
+    LIMITE_CURVA = 3000
+
+    def __init__(self, config: ConfigBacBo, padroes: Optional[List[PadraoBacBo]] = None,
+                 registrar: bool = True) -> None:
+        self.config = config
+        self.estrategia = EstrategiaBacBo(padroes if padroes is not None else PADROES_BACBO)
+        self.banca = BancaBacBo(config)
+        self.historico: Deque[RodadaBacBo] = deque(maxlen=config.tamanho_historico)
+        self.pendentes: List[SinalBacBo] = []
+        self.total_rodadas = 0
+        self.registrar = registrar
+        self.resultados: Deque[ResultadoBacBo] = deque(maxlen=self.LIMITE_FEED)
+        self.curva: List[Tuple[int, float, float]] = [(0, 0.0, 0.0)]
+        self._foto: Optional[tuple] = None
+
+    def processar(self, rodada: RodadaBacBo, permitir_desfazer: bool = False) -> List[ResultadoBacBo]:
+        if permitir_desfazer:
+            self._foto = (copy.deepcopy(self.banca), self.historico.copy(), list(self.pendentes),
+                          self.total_rodadas, list(self.resultados), list(self.curva))
+        self.total_rodadas += 1
+        self.historico.append(rodada)
+        resultados: List[ResultadoBacBo] = []
+        for sinal in self.pendentes:
+            try:
+                resultados.append(self.banca.liquidar(sinal, rodada))
+            except Exception as erro:
+                exibir(f"⚠️  Erro ao validar {sinal.nome}: {erro}")
+        self.pendentes = self.estrategia.analisar(self.historico, self.total_rodadas)
+        if self.registrar:
+            self.resultados.extend(resultados)
+            self.curva.append((self.total_rodadas, self.banca.total().lucro, self.banca.esperado()))
+            if len(self.curva) > self.LIMITE_CURVA:
+                self.curva = self.curva[:1] + self.curva[1:-1:2] + self.curva[-1:]
+        return resultados
+
+    def desfazer(self) -> bool:
+        if self._foto is None:
+            return False
+        banca, historico, pendentes, total, resultados, curva = self._foto
+        self.banca, self.historico, self.pendentes, self.total_rodadas = banca, historico, pendentes, total
+        self.resultados = deque(resultados, maxlen=self.LIMITE_FEED)
+        self.curva = curva
+        self._foto = None
+        return True
+
+
+def executar_backtest_bacbo(rodadas: int, semente: Optional[int], config: Optional[ConfigBacBo] = None,
+                            padroes: Optional[List[PadraoBacBo]] = None, ao_progredir=None) -> MotorBacBo:
+    """Backtest do Bac Bo com dados simulados (mesma semente = mesmas rodadas)."""
+    simulador = SimuladorBacBo(semente)
+    motor = MotorBacBo(config or ConfigBacBo(), padroes, registrar=False)
+    passo = max(1, rodadas // 100)
+    curva = [(0, 0.0, 0.0)]
+    for n in range(1, rodadas + 1):
+        motor.processar(simulador.proxima())
+        if n % passo == 0 or n == rodadas:
+            curva.append((n, motor.banca.total().lucro, motor.banca.esperado()))
+            if ao_progredir is not None:
+                ao_progredir(n / rodadas)
+    motor.curva = curva
+    return motor
+
+
+def rodar_bacbo_terminal(args: argparse.Namespace) -> None:
+    """No terminal, o Bac Bo tem o backtest (os outros modos ficam no painel visual)."""
+    if args.backtest is None:
+        exibir("No terminal, o Bac Bo tem só o backtest:  python robo_roleta.py --jogo bacbo --backtest 1000000")
+        exibir("Para os modos manual e simulador, use o painel visual (opção 6 do menu).")
+        return
+    if args.backtest <= 0:
+        exibir("⛔ Configuração inválida: --backtest precisa de um número positivo de rodadas.")
+        sys.exit(1)
+    inicio = time.time()
+    exibir(f"🧪 BACKTEST BAC BO: simulando {formatar_inteiro(args.backtest)} rodadas...")
+    motor = executar_backtest_bacbo(args.backtest, args.semente)
+    total, banca = motor.banca.total(), motor.banca
+    exibir("=" * 72)
+    exibir("🏁 RELATÓRIO FINAL — BAC BO")
+    exibir("=" * 72)
+    exibir(f"Rodadas analisadas      : {formatar_inteiro(args.backtest)}")
+    exibir(f"Tempo de execução       : {time.time() - inicio:.1f} s")
+    exibir(f"Sinais disparados       : {formatar_inteiro(total.sinais)}  (✅ {formatar_inteiro(total.greens)}"
+           f" | salvos no empate {formatar_inteiro(total.greens_protecao)} | ❌ {formatar_inteiro(total.losses)})")
+    exibir(f"Banca inicial → final   : {formatar_reais(banca.config.banca_inicial)} → {formatar_reais(banca.saldo)}")
+    exibir(f"Total apostado          : {formatar_reais(total.apostado)}")
+    exibir(f"Resultado real          : {formatar_reais(total.lucro, com_sinal=True)}")
+    exibir(f"Esperado pela matemática: {formatar_reais(banca.esperado(), com_sinal=True)}"
+           f"  (1,13% em Player/Banker e 4,48% no empate)")
+    exibir("-" * 72)
+    for padrao in PADROES_BACBO:
+        est = banca.estatisticas.get(padrao.chave, EstatisticaPadrao())
+        mat = MATEMATICA_BACBO[padrao.tipo]
+        exibir(f"   {padrao.nome:<34} | {formatar_inteiro(est.sinais):>7} sinais | acerto {formatar_pct(est.taxa_acerto):>6}"
+               f" | teórico {formatar_pct(mat['chance_teorica']):>6} | mínimo {formatar_pct(mat['acerto_minimo']):>6}"
+               f" | {formatar_reais(est.lucro, com_sinal=True)}")
+    exibir("=" * 72)
+
+
+# ===================================================================================
+# 12) BAC BO NO PAINEL VISUAL
+# -----------------------------------------------------------------------------------
+# Mesmo painel e mesmos modos da roleta. Escolha o jogo no topo da barra lateral.
+# A sessão da roleta e a do Bac Bo ficam guardadas separadas: trocar de jogo não apaga nada.
+# ===================================================================================
+JOGO_ROLETA, JOGO_BACBO = "Roleta", "Bac Bo"
+TAMANHO_GATILHO_BACBO = {"rep3": 3, "alt4": 4, "rep2": 2, "emp": 1, "2x2": 4, "surf4": 4}
+SEM_SOMA = "Não sei"
+
+
+def _tamanho_gatilho(chave: str) -> int:
+    """Quantas rodadas formam o gatilho (para mostrar a sequência que disparou)."""
+    if chave.startswith("c:"):
+        return len(chave[2:].split(">")[0])
+    return TAMANHO_GATILHO_BACBO.get(chave, 3)
+
+
+class SessaoBacBo:
+    """Estado do Bac Bo no painel: sessão manual/simulador, padrões ligados e o último backtest."""
+
+    def __init__(self, no_meu_pc: bool = False) -> None:
+        self.trava = threading.RLock()
+        self.no_meu_pc = no_meu_pc
+        salvo = ler_config_painel() if no_meu_pc else dict(CONFIG_PAINEL_PADRAO)
+        desligados = salvo.get("bacbo_padroes_desligados") or []
+        self.desligados: List[str] = [c for c in desligados if isinstance(c, str)]
+        self.extras_txt: str = str(salvo.get("bacbo_padroes_extras") or "")
+        self.erros_padroes: List[str] = []
+        self.padroes: List[PadraoBacBo] = self._montar_padroes()
+        self.config = ConfigBacBo()
+        self.motor = MotorBacBo(self.config, self.padroes)
+        self.sim = {"rodando": False, "dados": None, "rng": None, "proximo": 0.0, "rapido": False}
+        self.backtest: Optional[dict] = None
+
+    # --- padrões -------------------------------------------------------------------
+    def _montar_padroes(self) -> List[PadraoBacBo]:
+        extras, self.erros_padroes = ler_padroes_personalizados(self.extras_txt)
+        return [p for p in PADROES_BACBO if p.chave not in self.desligados] + extras
+
+    def atualizar_padroes(self, desligados: List[str], extras_txt: str) -> None:
+        with self.trava:
+            if desligados == self.desligados and extras_txt == self.extras_txt:
+                return
+            self.desligados, self.extras_txt = list(desligados), extras_txt
+            self.padroes = self._montar_padroes()
+            # Vale na hora: o alerta da tela passa a mostrar só o que os padrões novos enxergam
+            self.motor.estrategia.padroes = list(self.padroes)
+            self.motor.pendentes = self.motor.estrategia.analisar(self.motor.historico, self.motor.total_rodadas)
+            if self.no_meu_pc:
+                salvar_config_painel({"bacbo_padroes_desligados": self.desligados,
+                                      "bacbo_padroes_extras": self.extras_txt})
+
+    def padroes_sao_os_prontos(self) -> bool:
+        return [p.chave for p in self.padroes] == [p.chave for p in PADROES_BACBO]
+
+    # --- sessão --------------------------------------------------------------------
+    def nova_sessao(self, config: ConfigBacBo) -> None:
+        with self.trava:
+            self.config = config
+            self.motor = MotorBacBo(config, self.padroes)
+
+    def iniciar_sim(self, rapido: bool, semente: Optional[int]) -> None:
+        with self.trava:
+            self.sim.update(rodando=True, dados=SimuladorBacBo(semente), rapido=rapido,
+                            rng=random.Random(None if semente is None else semente + 1))
+            self.sim["proximo"] = time.time() + self._intervalo_sim()
+
+    def _intervalo_sim(self) -> float:
+        return 1.0 if self.sim["rapido"] else self.sim["rng"].uniform(15.0, 20.0)
+
+    def tick(self) -> None:
+        with self.trava:
+            if self.sim["rodando"]:
+                agora, feitos = time.time(), 0
+                while agora >= self.sim["proximo"] and feitos < 30:
+                    self.motor.processar(self.sim["dados"].proxima())
+                    self.sim["proximo"] += self._intervalo_sim()
+                    feitos += 1
+
+
+def obter_bacbo(sessao: SessaoWeb, no_meu_pc: bool) -> SessaoBacBo:
+    """A sessão do Bac Bo mora dentro da sessão do painel (criada na primeira vez)."""
+    if getattr(sessao, "bacbo", None) is None:
+        sessao.bacbo = SessaoBacBo(no_meu_pc)
+    return sessao.bacbo
+
+
+def _carregar_historico_bacbo(motor: MotorBacBo, rodadas: List[RodadaBacBo]) -> None:
+    """Resultados que a mesa já mostrava (do mais antigo para o mais novo), sem apostar."""
+    for rodada in rodadas:
+        motor.historico.append(rodada)
+    motor.pendentes = motor.estrategia.analisar(motor.historico, motor.total_rodadas)
+
+
+class HtmlBacBo:
+    """Pedaços visuais do Bac Bo (usam o mesmo CSS do painel da roleta)."""
+
+    COR = {PLAYER: Html.CORES["player"], BANKER: Html.CORES["red"], EMPATE: Html.CORES["gold"]}
+    CLASSE = {PLAYER: "p", BANKER: "b", EMPATE: "e"}
+    PREVISTO = "Previsto pela matemática (1,13% em Player/Banker e 4,48% no empate)"
+
+    @classmethod
+    def chip(cls, rodada: RodadaBacBo, extra: str = "") -> str:
+        letra, soma = rodada.resultado, rodada.soma_vencedora
+        if rodada.soma_player is not None and rodada.soma_banker is not None and letra != EMPATE:
+            titulo = f"{NOMES_LADO[letra]} · Player {rodada.soma_player} x {rodada.soma_banker} Banker"
+        else:
+            titulo = NOMES_LADO[letra] + (f" · soma {soma}" if soma else "")
+        sub = f"<small>{soma}</small>" if soma else ""
+        return f'<span class="bb-chip {cls.CLASSE[letra]} {extra}" title="{titulo}">{letra}{sub}</span>'
+
+    @classmethod
+    def faixa(cls, historico: Deque[RodadaBacBo]) -> str:
+        rodadas = list(historico)[::-1]  # mais recente primeiro
+        if not rodadas:
+            return ('<div class="rr-bloco"><div class="rr-h">Últimas rodadas</div>'
+                    '<span class="rr-nota">Nenhuma rodada ainda. Os resultados aparecem aqui assim que saírem.</span></div>')
+        conta = {lado: sum(1 for r in rodadas if r.resultado == lado) for lado in (PLAYER, BANKER, EMPATE)}
+        chips = "".join(cls.chip(r, "nova" if i == 0 else "") for i, r in enumerate(rodadas))
+        return (f'<div class="rr-bloco"><div class="rr-h">Últimas rodadas<small>mais recente à esquerda · '
+                f'P {conta[PLAYER]} · B {conta[BANKER]} · E {conta[EMPATE]}</small></div>'
+                f'<div class="rr-pedras">{chips}</div></div>')
+
+    @staticmethod
+    def cartoes(motor: MotorBacBo) -> str:
+        banca, total = motor.banca, motor.banca.total()
+        variacao = banca.saldo - motor.config.banca_inicial
+        if total.sinais:
+            teorico = sum(est.sinais * MATEMATICA_BACBO[banca.tipos[ch]]["chance_teorica"]
+                          for ch, est in banca.estatisticas.items()) / total.sinais
+            acerto_txt, acerto_det = formatar_pct(total.taxa_acerto), f"chance real dos alvos: {formatar_pct(teorico)}"
+        else:
+            acerto_txt, acerto_det = "—", "aparece depois do primeiro sinal"
+        esperado = banca.esperado()
+        return '<div class="rr-cartoes">' + "".join([
+            Html.cartao("Banca fictícia", formatar_reais(banca.saldo),
+                        f'<span class="{"rr-pos" if variacao >= 0 else "rr-neg"}">{formatar_reais(variacao, com_sinal=True)}</span>'
+                        f" desde o início"),
+            Html.cartao("Acerto geral", acerto_txt, acerto_det),
+            Html.cartao("Sinais conferidos", formatar_inteiro(total.sinais),
+                        f'<span class="rr-pos">{total.greens} GREEN</span> · <span class="rr-neg">{total.losses} LOSS</span>'
+                        f" · {total.greens_protecao} salvos no empate"),
+            Html.cartao("Resultado vs. esperado", formatar_reais(total.lucro, com_sinal=True),
+                        f"a matemática previa {formatar_reais(esperado, com_sinal=True)}",
+                        "rr-pos" if total.lucro > 0 else ("rr-neg" if total.lucro < 0 else "")),
+        ]) + "</div>"
+
+    @classmethod
+    def alerta(cls, sinal: SinalBacBo, motor: MotorBacBo) -> str:
+        cfg = motor.config
+        gatilho = "".join(cls.chip(r, "pq") for r in list(motor.historico)[-_tamanho_gatilho(sinal.chave):])
+        alvo = (f'<span class="rr-alvo"><span class="sw" style="background:{cls.COR[sinal.alvo]}"></span>'
+                f'{NOMES_LADO[sinal.alvo]}</span>')
+        if sinal.alvo == EMPATE:
+            valor = (f'<div class="rr-valor">{formatar_reais(cfg.valor_por_alvo)}'
+                     f'<small>no empate · paga de 4:1 a 88:1, conforme a soma dos dados</small></div>')
+            protecao = '<div class="rr-valor" style="font-size:1rem">Não se aplica</div>'
+        else:
+            com_protecao = cfg.protecao_empate and cfg.valor_protecao_empate > 0
+            total = cfg.valor_por_alvo + (cfg.valor_protecao_empate if com_protecao else 0.0)
+            valor = (f'<div class="rr-valor">{formatar_reais(cfg.valor_por_alvo)}'
+                     f'<small>no {NOMES_LADO[sinal.alvo]} · {formatar_reais(total)} no total</small></div>')
+            if com_protecao:
+                protecao = (f'<div class="rr-valor" style="display:flex;align-items:center;gap:10px">'
+                            f'{cls.chip(RodadaBacBo.do_resultado(EMPATE), "pq")}{formatar_reais(cfg.valor_protecao_empate)}'
+                            f'<small style="display:inline">no empate</small></div>')
+            else:
+                protecao = ('<div class="rr-valor" style="font-size:1rem">Sem proteção'
+                            '<small>no empate volta 90% da entrada</small></div>')
+        return (f'<div class="rr-alerta"><div class="tag">Gatilho ativado</div>'
+                f'<div class="pad">{html.escape(sinal.nome)}</div><div class="grade">'
+                f'<div><div class="lbl">Alvo da entrada</div><div class="rr-alvos">{alvo}</div>'
+                f'<div class="lbl" style="margin-top:14px">Sequência que disparou</div><div class="rr-pedras">{gatilho}</div></div>'
+                f'<div><div class="lbl">Valor sugerido</div>{valor}</div>'
+                f'<div><div class="lbl">Proteção</div>{protecao}</div>'
+                f'</div><div class="rr-validade">Vale só para a próxima rodada. O painel confere sozinho e lança na banca fictícia.</div></div>')
+
+    @classmethod
+    def alertas(cls, motor: MotorBacBo) -> str:
+        lados = {s.alvo for s in motor.pendentes}
+        aviso = ('<div class="rr-aviso">Sinais opostos nesta rodada (Player e Banker): '
+                 'entrando nos dois, um anula o outro.</div>') if {PLAYER, BANKER} <= lados else ""
+        return "".join(cls.alerta(s, motor) for s in motor.pendentes) + aviso
+
+    @classmethod
+    def sem_alerta(cls, motor: MotorBacBo, padroes: List[PadraoBacBo]) -> str:
+        ultimo = cls.chip(motor.historico[-1], "pq") if motor.historico else ""
+        if padroes:
+            texto = f"{len(padroes)} padrões ligados · o alerta aparece aqui assim que uma sequência se formar"
+        else:
+            texto = "Nenhum padrão ligado: escolha os padrões em “Padrões do Bac Bo”, na barra lateral"
+        return f'<div class="rr-calmo">{ultimo}<div><b>Nenhum gatilho ativo</b><br><span>{texto}</span></div></div>'
+
+    @staticmethod
+    def feed(motor: MotorBacBo, limite: int = 10) -> str:
+        itens = list(motor.resultados)[-limite:][::-1]
+        if not itens:
+            return ('<div class="rr-bloco"><div class="rr-h">Últimas entradas</div>'
+                    '<span class="rr-nota">Os sinais conferidos aparecem aqui.</span></div>')
+        linhas = []
+        for r in itens:
+            classe = {"GREEN": "g", "LOSS": "l", "EMPATE": "z"}[r.status]
+            soma = r.rodada.soma_vencedora
+            saiu = NOMES_LADO[r.rodada.resultado] + (f" {soma}" if soma else "")
+            linhas.append(f'<div class="rr-item"><span class="rr-badge {classe}">{r.status}</span>'
+                          f'<span class="t">{html.escape(r.sinal.nome)} · alvo {NOMES_LADO[r.sinal.alvo]} · saiu {saiu}</span>'
+                          f'<span class="x {"rr-pos" if r.lucro > 0 else "rr-neg"}">{formatar_reais(r.lucro, com_sinal=True)}</span></div>')
+        return f'<div class="rr-bloco"><div class="rr-h">Últimas entradas</div><div class="rr-feed">{"".join(linhas)}</div></div>'
+
+    @staticmethod
+    def tabela(banca: BancaBacBo, padroes: List[PadraoBacBo], titulo: str = "Desempenho por padrão") -> str:
+        ligados = {p.chave: p for p in padroes}
+        ordem = list(ligados) + [ch for ch in banca.estatisticas if ch not in ligados]
+        if not ordem:
+            return (f'<div class="rr-bloco"><div class="rr-h">{titulo}</div>'
+                    '<span class="rr-nota">Nenhum padrão ligado.</span></div>')
+        linhas = []
+        for ch in ordem:
+            est = banca.estatisticas.get(ch, EstatisticaPadrao())
+            padrao = ligados.get(ch)
+            nome = padrao.nome if padrao else banca.nomes.get(ch, ch) + " (desligado)"
+            mat = MATEMATICA_BACBO[padrao.tipo if padrao else banca.tipos.get(ch, "lado")]
+            acerto = formatar_pct(est.taxa_acerto) if est.sinais else "—"
+            linhas.append(f"<tr><td>{html.escape(nome)}</td><td>{formatar_inteiro(est.sinais)}</td><td>{acerto}</td>"
+                          f"<td>{formatar_pct(mat['chance_teorica'])}</td><td>{formatar_pct(mat['acerto_minimo'])}</td>"
+                          f'<td class="{"rr-pos" if est.lucro > 0 else ("rr-neg" if est.lucro < 0 else "")}">'
+                          f"{formatar_reais(est.lucro, com_sinal=True)}</td></tr>")
+        return (f'<div class="rr-bloco"><div class="rr-h">{titulo}</div><table class="rr-tabela"><thead><tr><th>Padrão</th><th>Sinais</th>'
+                f"<th>Acerto</th><th>Chance real</th><th>Para empatar</th><th>Resultado</th></tr></thead>"
+                f'<tbody>{"".join(linhas)}</tbody></table>'
+                f'<div class="rr-nota">Acerto é quantas vezes o alvo saiu. Em Player ou Banker, o empate dos dados não conta como acerto '
+                f'(volta 90% da entrada). Para empatar considera só a aposta principal, sem a proteção. '
+                f"Com poucos sinais o acerto oscila muito; com muitos, ele encosta na chance real.</div></div>")
+
+
+def _ajustes_bacbo(st, bacbo: SessaoBacBo) -> Tuple[dict, ConfigBacBo, bool]:
+    """Ajustes da banca fictícia do Bac Bo (na barra lateral)."""
+    with st.expander("Ajustes da banca fictícia"):
+        valor = st.number_input("Valor por entrada (R$)", min_value=1.0, max_value=100000.0, value=10.0, step=1.0, key="bb_valor")
+        cobrir = st.checkbox("Cobrir o empate", value=True, key="bb_emp_on")
+        valor_emp = st.number_input("Valor no empate (R$)", min_value=0.0, max_value=100000.0, value=1.0, step=0.5, key="bb_emp_valor")
+        banca_ini = st.number_input("Banca inicial (R$)", min_value=1.0, max_value=10_000_000.0, value=1000.0, step=100.0, key="bb_banca")
+        st.caption("A proteção acompanha as entradas em Player ou Banker. Os valores padrão são os do teste de aceitação.")
+    ajustes = dict(valor_por_alvo=float(valor), protecao_empate=bool(cobrir),
+                   valor_protecao_empate=float(valor_emp), banca_inicial=float(banca_ini))
+    try:
+        config = ConfigBacBo(**ajustes)
+    except ValueError as erro:
+        st.error(f"Ajuste inválido: {erro}")
+        config = ConfigBacBo()
+    mudou = any(getattr(bacbo.config, k) != v for k, v in ajustes.items())
+    return ajustes, config, mudou
+
+
+def _padroes_bacbo(st, bacbo: SessaoBacBo) -> None:
+    """Liga/desliga os padrões prontos e recebe os seus (um por linha, tipo PPB -> P)."""
+    nomes = {p.chave: p.nome for p in PADROES_BACBO}
+    # O valor inicial vem do que ficou guardado (no PC, do arquivo de configuração)
+    if "bb_pad_sel" not in st.session_state:
+        st.session_state["bb_pad_sel"] = [nomes[ch] for ch in nomes if ch not in bacbo.desligados]
+    if "bb_pad_extra" not in st.session_state:
+        st.session_state["bb_pad_extra"] = bacbo.extras_txt
+    with st.expander("Padrões do Bac Bo"):
+        escolhidos = st.multiselect("Padrões prontos ligados", list(nomes.values()), key="bb_pad_sel")
+        texto = st.text_area("Seus padrões (um por linha)", key="bb_pad_extra", height=120,
+                             placeholder="PPB -> P\nBBBB -> P\nEP -> E")
+        bacbo.atualizar_padroes([ch for ch, nome in nomes.items() if nome not in escolhidos], texto or "")
+        for erro in bacbo.erros_padroes:
+            st.error(erro)
+        st.caption("P = Player, B = Banker, E = Empate. O padrão dispara quando as últimas rodadas forem "
+                   "exatamente a sequência da esquerda, e a entrada é na letra da direita. "
+                   f"Ligados agora: {len(bacbo.padroes)}.")
+
+
+def _cabecalho_bacbo(st, bacbo: SessaoBacBo, modo: str) -> None:
+    if modo == MODO_AUTO:
+        status = ("Em preparação", "alerta")
+    elif modo == MODO_SIM:
+        status = ("Simulando", "on") if bacbo.sim["rodando"] else ("Pausado", "")
+    elif modo == MODO_MANUAL:
+        status = ("Aguardando a próxima rodada", "on")
+    else:
+        status = ("Backtest", "")
+    st.markdown(f'<div class="rr-topo"><div><div class="rr-sub">Bac Bo · {html.escape(modo)}</div>'
+                f'<div class="rr-titulo" role="heading" aria-level="1">Painel de sinais</div></div>'
+                f'<span class="rr-status {status[1]}"><i></i>{status[0]}</span></div>', unsafe_allow_html=True)
+
+
+def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: ConfigBacBo) -> None:
+    """A tela do Bac Bo, chamada pelo app_web quando o jogo escolhido é o Bac Bo."""
+    if modo == MODO_BACKTEST:
+        _cabecalho_bacbo(st, bacbo, modo)
+        demonstracao = None
+        if not no_meu_pc:
+            @st.cache_resource(show_spinner="Rodando o backtest de 1.000.000 de rodadas de Bac Bo (só na primeira visita)...")
+            def backtest_demonstracao_bacbo() -> dict:
+                inicio = time.time()
+                motor = executar_backtest_bacbo(1_000_000, 42)
+                return {"rodadas": 1_000_000, "semente": 42, "motor": motor, "padroes": list(PADROES_BACBO),
+                        "segundos": time.time() - inicio, "padrao": True, "demonstracao": True}
+            demonstracao = backtest_demonstracao_bacbo
+        _tela_backtest_bacbo(st, bacbo, config_tela, demonstracao)
+        return
+
+    if modo == MODO_AUTO:
+        _cabecalho_bacbo(st, bacbo, modo)
+        st.info("A leitura automática da mesa de Bac Bo ainda está em preparação: falta o robô aprender onde a mesa "
+                "mostra os resultados. Enquanto isso, use o modo manual (você clica em quem ganhou cada rodada), "
+                "o simulador ou o backtest.")
+        return
+
+    if modo == MODO_MANUAL:
+        _cabecalho_bacbo(st, bacbo, modo)
+        _tela_manual_bacbo(st, bacbo)
+
+    ao_vivo = bacbo.sim["rodando"]
+
+    def painel_bacbo() -> None:
+        bacbo.tick()
+        if modo == MODO_SIM:
+            _cabecalho_bacbo(st, bacbo, modo)
+            _controles_sim_bacbo(st, bacbo)
+        motor = bacbo.motor
+        st.markdown(HtmlBacBo.cartoes(motor), unsafe_allow_html=True)
+        st.markdown(HtmlBacBo.faixa(motor.historico), unsafe_allow_html=True)
+        if motor.pendentes:
+            st.markdown(HtmlBacBo.alertas(motor), unsafe_allow_html=True)
+        else:
+            st.markdown(HtmlBacBo.sem_alerta(motor, bacbo.padroes), unsafe_allow_html=True)
+        esquerda, direita = st.columns([1, 1.4])
+        esquerda.markdown(HtmlBacBo.feed(motor), unsafe_allow_html=True)
+        direita.markdown(HtmlBacBo.tabela(motor.banca, bacbo.padroes), unsafe_allow_html=True)
+        st.markdown(Html.grafico_curva(motor.curva, "Banca da sessão", "rodadas", HtmlBacBo.PREVISTO),
+                    unsafe_allow_html=True)
+
+    st.fragment(painel_bacbo, run_every=1.0 if ao_vivo else None)()
+
+
+def _clicar_bacbo(bacbo: SessaoBacBo, lado: str) -> None:
+    """Clique em Player/Banker/Empate. Roda antes da tela ser redesenhada (callback do Streamlit)."""
+    import streamlit as st
+
+    escolha = st.session_state.get("bb_soma", SEM_SOMA)
+    soma = None if escolha in (None, SEM_SOMA) else int(escolha)
+    if soma == 2 and lado != EMPATE:
+        st.session_state["bb_erro"] = "Soma 2 só acontece no empate (1+1 contra 1+1). Confira e clique de novo."
+        return
+    with bacbo.trava:
+        bacbo.motor.processar(RodadaBacBo.do_resultado(lado, soma), permitir_desfazer=True)
+    st.session_state["bb_soma"] = SEM_SOMA  # volta para "Não sei" e não contamina a próxima rodada
+
+
+def _tela_manual_bacbo(st, bacbo: SessaoBacBo) -> None:
+    """Botões de quem ganhou a rodada, com a soma dos dados opcional."""
+    with st.expander("Carregar as últimas rodadas que a mesa já mostra"):
+        c1, c2 = st.columns([4, 1])
+        texto = c1.text_input("Do mais recente para o mais antigo: P (Player), B (Banker) ou E (Empate)",
+                              key="bb_hist", placeholder="ex.: P B B E P")
+        if c2.button("Carregar", key="bb_carregar"):
+            letras = [c for c in texto.upper() if c not in " ,;-"]
+            if not letras or any(c not in "PBE" for c in letras):
+                st.error("Use só as letras P (Player), B (Banker) e E (Empate).")
+            else:
+                with bacbo.trava:
+                    _carregar_historico_bacbo(bacbo.motor, [RodadaBacBo.do_resultado(c) for c in reversed(letras)])
+
+    st.markdown('<div class="rr-sub">Clique em quem ganhou a rodada</div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
+    for coluna, (lado, chave) in zip((c1, c2, c3), ((PLAYER, "bb_p"), (BANKER, "bb_b"), (EMPATE, "bb_e"))):
+        coluna.button(NOMES_LADO[lado], key=chave, on_click=_clicar_bacbo, args=(bacbo, lado))
+    c4.selectbox("Soma dos dados de quem ganhou (opcional)", [SEM_SOMA] + [str(s) for s in range(2, 13)], key="bb_soma",
+                 help="Só muda o pagamento do empate (de 4:1 a 88:1). Sem a soma, o painel usa 4:1, o menor.")
+    erro = st.session_state.pop("bb_erro", None)
+    if erro:
+        st.error(erro)
+    c1, _ = st.columns([1, 5])
+    if c1.button("Desfazer última", key="bb_desfazer"):
+        with bacbo.trava:
+            if not bacbo.motor.desfazer():
+                st.warning("Nada para desfazer (dá para desfazer só a última rodada, uma vez).")
+
+
+def _controles_sim_bacbo(st, bacbo: SessaoBacBo) -> None:
+    c1, c2, c3 = st.columns([2, 2, 1])
+    velocidade = c1.radio("Velocidade", ["Normal (15 a 20 s)", "Acelerado (1 s)"], key="bb_vel", horizontal=True)
+    semente = c2.number_input("Semente (0 = aleatória)", min_value=0, max_value=10**9, value=0, step=1, key="bb_sem")
+    if bacbo.sim["rodando"]:
+        if c3.button("Pausar", key="bb_pau_sim"):
+            bacbo.sim["rodando"] = False
+            st.rerun()
+    elif c3.button("Iniciar", key="bb_ini_sim", type="primary"):
+        bacbo.iniciar_sim(velocidade.startswith("Acelerado"), int(semente) or None)
+        st.rerun()
+
+
+def _tela_backtest_bacbo(st, bacbo: SessaoBacBo, config_tela: ConfigBacBo, demonstracao=None) -> None:
+    """Backtest do Bac Bo com os padrões ligados e os ajustes da barra lateral."""
+    c1, c2, c3 = st.columns([2, 2, 1])
+    rodadas = c1.number_input("Rodadas", min_value=1000, max_value=5_000_000, value=1_000_000, step=100_000, key="bb_bt_rod")
+    semente = c2.number_input("Semente", min_value=0, max_value=10**9, value=42, step=1, key="bb_bt_sem")
+    if c3.button("Rodar backtest", key="bb_bt_rodar", type="primary"):
+        if not bacbo.padroes:
+            st.error("Nenhum padrão ligado. Escolha os padrões em “Padrões do Bac Bo”, na barra lateral.")
+        else:
+            barra = st.progress(0.0, text="Simulando...")
+            inicio = time.time()
+            motor = executar_backtest_bacbo(int(rodadas), int(semente), config_tela, list(bacbo.padroes),
+                                            ao_progredir=lambda f: barra.progress(min(1.0, f), text=f"Simulando... {f * 100:.0f}%"))
+            barra.empty()
+            bacbo.backtest = {"rodadas": int(rodadas), "semente": int(semente), "motor": motor,
+                              "padroes": list(bacbo.padroes), "segundos": time.time() - inicio,
+                              "padrao": config_tela == ConfigBacBo() and bacbo.padroes_sao_os_prontos()}
+
+    resultado = bacbo.backtest
+    if not resultado and demonstracao is not None:
+        resultado = demonstracao()  # versão hospedada: mostra o teste de aceitação já pronto
+    if not resultado:
+        st.markdown('<div class="rr-calmo"><div><b>Rode um backtest</b><br><span>1.000.000 de rodadas com semente 42, '
+                    'os 6 padrões prontos e os ajustes padrão é o teste de aceitação: tem que dar 592.519 sinais '
+                    'e −R$ 113.722,00.</span></div></div>', unsafe_allow_html=True)
+        return
+    if resultado.get("demonstracao"):
+        st.caption("Demonstração com os 6 padrões prontos e os ajustes padrão. Rode o seu backtest para testar "
+                   "os padrões que você ligou ou cadastrou.")
+    motor: MotorBacBo = resultado["motor"]
+    total = motor.banca.total()
+    st.markdown('<div class="rr-cartoes">' + "".join([
+        Html.cartao("Rodadas simuladas", formatar_inteiro(resultado["rodadas"]),
+                    f'semente {resultado["semente"]} · {resultado["segundos"]:.1f} s'),
+        Html.cartao("Sinais conferidos", formatar_inteiro(total.sinais),
+                    f'<span class="rr-pos">{formatar_inteiro(total.greens)} GREEN</span> · '
+                    f'<span class="rr-neg">{formatar_inteiro(total.losses)} LOSS</span>'),
+        Html.cartao("Resultado real", formatar_reais(total.lucro, com_sinal=True),
+                    (f"{total.lucro / total.apostado * 100:.2f}%".replace(".", ",") + " do total apostado")
+                    if total.apostado else "nenhum sinal disparado",
+                    "rr-pos" if total.lucro > 0 else "rr-neg"),
+        Html.cartao("Esperado pela matemática", formatar_reais(motor.banca.esperado(), com_sinal=True),
+                    "1,13% em Player/Banker · 4,48% no empate"),
+    ]) + "</div>", unsafe_allow_html=True)
+    if resultado["rodadas"] == 1_000_000 and resultado["semente"] == 42 and resultado["padrao"]:
+        bateu = total.sinais == 592_519 and round(total.lucro, 2) == -113_722.0
+        st.markdown(f'<div class="rr-selo {"ok" if bateu else "nao"}">'
+                    f'{"Teste de aceitação: bateu" if bateu else "Teste de aceitação: NÃO bateu"} · '
+                    f'{formatar_inteiro(total.sinais)} sinais · {formatar_reais(total.lucro, com_sinal=True)}</div>',
+                    unsafe_allow_html=True)
+    st.markdown(Html.grafico_curva(motor.curva, "Banca no backtest", "rodadas", HtmlBacBo.PREVISTO), unsafe_allow_html=True)
+    st.markdown(HtmlBacBo.tabela(motor.banca, resultado["padroes"], "Desempenho por padrão no backtest"),
+                unsafe_allow_html=True)
 
 
 def rodando_no_streamlit() -> bool:
