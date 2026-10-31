@@ -4,3 +4,6 @@ painel_robo.log
 painel_robo.porta
 __pycache__/
 *.pyc
+painel_robo_config.json
+robo_roleta_anterior.py
+*.baixando.py

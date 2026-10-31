@@ -822,9 +822,19 @@ class ColetorNavegador(ColetorBase):
     EMENDA_MINIMA = 3        # quantos números em comum confirmam onde as leituras se emendam
     TOLERANCIA_SUMICO = 15   # segundos sem achar a faixa antes de procurar de novo
     PORTA_DEPURACAO = 9222   # porta local (só no seu PC) por onde o robô lê o Chrome
+    # Opções oficiais do Chrome que impedem que ele "durma" quando está minimizado ou
+    # fora da tela (sem elas, uma página escondida para de se atualizar).
+    OPCOES_SEMPRE = ["--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
+                     "--disable-renderer-backgrounding"]
+    # Modo escondido: a janela abre fora da área da tela, então você não a vê.
+    OPCOES_ESCONDIDO = ["--window-position=-2400,-2400", "--window-size=1280,860"]
+    # Modo com janela: posição explícita na tela. Sem isso o Chrome reabriria onde estava da
+    # última vez, ou seja, escondido, se a vez anterior foi no modo escondido.
+    OPCOES_JANELA = ["--window-position=40,40", "--window-size=1280,860"]
 
     def __init__(self, url: Optional[str] = None, pasta_perfil: Optional[str] = None,
-                 headless: bool = False) -> None:
+                 headless: bool = False, escondido: bool = False) -> None:
+        self.escondido = escondido
         try:
             from playwright.sync_api import Error as ErroPlaywright, sync_playwright
         except ImportError as erro:
@@ -845,7 +855,7 @@ class ColetorNavegador(ColetorBase):
                 # Só para testes automáticos: o Playwright abre um navegador invisível.
                 self._contexto = self._pw.chromium.launch_persistent_context(pasta_perfil, headless=True)
             else:
-                self._navegador = self._conectar_no_chrome(pasta_perfil)
+                self._navegador = self._conectar_no_chrome(pasta_perfil, escondido)
                 contextos = self._navegador.contexts
                 self._contexto = contextos[0] if contextos else self._navegador.new_context()
         except Exception:
@@ -870,25 +880,51 @@ class ColetorNavegador(ColetorBase):
         self._sumiu_desde: Optional[float] = None
         self._avisou_sumico = False
 
-    def _conectar_no_chrome(self, pasta_perfil: str):
-        """Conecta no Chrome do robô; se ele ainda não estiver aberto, abre um normal."""
+    def _conectar_no_chrome(self, pasta_perfil: str, escondido: bool = False):
+        """Conecta no Chrome do robô; se ele não estiver aberto (ou estiver no outro modo), abre."""
         endereco = f"http://127.0.0.1:{self.PORTA_DEPURACAO}"
+        modo = "escondido" if escondido else "janela"
+        marcador = os.path.join(pasta_perfil, "modo_do_robo.txt")  # em que modo o Chrome foi aberto
 
-        # 1) O Chrome do robô ficou aberto de uma execução anterior? Então só conecta.
+        # 1) O Chrome do robô ficou aberto de uma execução anterior? Se for no mesmo modo, só conecta.
         try:
-            return self._pw.chromium.connect_over_cdp(endereco, timeout=3000)
+            navegador = self._pw.chromium.connect_over_cdp(endereco, timeout=3000)
         except self._ErroPlaywright:
-            pass
+            navegador = None
+        if navegador is not None:
+            try:
+                with open(marcador, encoding="utf-8") as arq:
+                    modo_atual = arq.read().strip()
+            except OSError:
+                modo_atual = "janela"
+            if modo_atual == modo:
+                return navegador
+            # Está no outro modo: fecha e reabre (o login continua salvo no perfil)
+            exibir(f"🌐 Reabrindo o Chrome do robô {'escondido' if escondido else 'com janela'}...")
+            self._fechar_chrome_de_verdade(navegador)
+            prazo = time.time() + 15
+            while time.time() < prazo:  # espera o Chrome antigo terminar de fechar
+                time.sleep(0.5)
+                try:
+                    self._pw.chromium.connect_over_cdp(endereco, timeout=1000).close()
+                except self._ErroPlaywright:
+                    break
 
-        # 2) Senão, abre um Chrome comum (igual a clicar no ícone), com perfil próprio e
-        #    a porta de depuração ligada. A porta só aceita conexões do seu próprio PC.
+        # 2) Abre um Chrome comum (igual a clicar no ícone), com perfil próprio e a porta de
+        #    depuração ligada. A porta só aceita conexões do seu próprio PC.
         executavel = self._achar_chrome()
         if executavel is None:
             raise RuntimeError("não encontrei o Google Chrome instalado neste computador.")
-        subprocess.Popen(
-            [executavel, f"--remote-debugging-port={self.PORTA_DEPURACAO}",
-             f"--user-data-dir={pasta_perfil}", "--no-first-run", "--no-default-browser-check"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        comando = [executavel, f"--remote-debugging-port={self.PORTA_DEPURACAO}",
+                   f"--user-data-dir={pasta_perfil}", "--no-first-run", "--no-default-browser-check"]
+        comando += self.OPCOES_SEMPRE + (self.OPCOES_ESCONDIDO if escondido else self.OPCOES_JANELA)
+        subprocess.Popen(comando, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.makedirs(pasta_perfil, exist_ok=True)
+            with open(marcador, "w", encoding="utf-8") as arq:
+                arq.write(modo)
+        except OSError:
+            pass
 
         prazo = time.time() + 30  # o Chrome pode demorar alguns segundos para abrir
         while time.time() < prazo:
@@ -1110,9 +1146,20 @@ class ColetorNavegador(ColetorBase):
                 time.sleep(self.INTERVALO_LEITURA)
         return self._fila.popleft()
 
+    @staticmethod
+    def _fechar_chrome_de_verdade(navegador) -> None:
+        """Fecha o Chrome do robô (não só a conexão), pedindo pela própria porta de depuração."""
+        try:
+            navegador.new_browser_cdp_session().send("Browser.close")
+        except Exception:
+            pass  # já estava fechado
+
     def fechar(self) -> None:
-        # No modo normal, só "solta" a conexão: a janela do Chrome continua aberta para a
-        # próxima vez. No modo de teste (invisível), fecha o navegador de vez.
+        # Com janela, só "solta" a conexão: a janela do Chrome continua aberta para a próxima
+        # vez. Escondido, ninguém a vê, então o Chrome é fechado para não ficar rodando à toa.
+        # No modo de teste (invisível do Playwright), fecha o navegador de vez.
+        if self._navegador is not None and self.escondido:
+            self._fechar_chrome_de_verdade(self._navegador)
         acoes = [self._navegador.close] if self._navegador is not None else [self._contexto.close]
         for acao in acoes + [self._pw.stop]:
             try:
@@ -1520,6 +1567,9 @@ def ler_argumentos(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--atualizar", action="store_true",
                         help="baixa a versão mais nova do robô no GitHub e troca este arquivo")
     parser.add_argument("--leitor-json", action="store_true", help=argparse.SUPPRESS)  # usado pelo painel
+    parser.add_argument("--escondido", action="store_true",
+                        help="no modo --navegador, abre o Chrome do robô sem janela visível")
+    parser.add_argument("--auto-confirmar", action="store_true", help=argparse.SUPPRESS)  # usado pelo painel
     return parser.parse_args(argv)
 
 
@@ -1609,7 +1659,7 @@ def rodar(args: argparse.Namespace) -> None:
     if args.navegador:
         exibir("🌐 Abrindo o navegador...")
         try:
-            coletor = ColetorNavegador(url=args.url, headless=args.headless)
+            coletor = ColetorNavegador(url=args.url, headless=args.headless, escondido=args.escondido)
         except RuntimeError as erro:
             exibir(f"⛔ {erro}")
             sys.exit(1)
@@ -1655,7 +1705,7 @@ def main() -> None:
         args = ler_argumentos(argv)
         if args.leitor_json:  # chamado pelo painel web: lê a mesa e responde em JSON
             veio_do_menu = False
-            modo_leitor_json(args.url)
+            modo_leitor_json(args.url, escondido=args.escondido, auto_confirmar=args.auto_confirmar)
             return
         if args.web:
             if abrir_painel_web():
@@ -2000,7 +2050,7 @@ def executar_backtest(giros: int, semente: Optional[int], config: Optional[Confi
     return motor
 
 
-def modo_leitor_json(url: Optional[str]) -> None:
+def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar: bool = False) -> None:
     """
     Roda como processo separado, chamado pelo painel com --leitor-json. Lê a mesa pelo
     Chrome (ColetorNavegador) e escreve uma linha JSON por evento:
@@ -2038,7 +2088,7 @@ def modo_leitor_json(url: Optional[str]) -> None:
     threading.Thread(target=ler_comandos, daemon=True).start()
     emitir(tipo="fase", fase="conectando")
     try:
-        coletor = ColetorNavegador(url=url)
+        coletor = ColetorNavegador(url=url, escondido=escondido)
     except Exception as erro:
         emitir(tipo="erro", texto=str(erro))
         return
@@ -2049,6 +2099,7 @@ def modo_leitor_json(url: Optional[str]) -> None:
             candidatas: List[Tuple[str, str, List[int]]] = []
             ultimo_envio: Optional[list] = None
             ultimo_diagnostico = time.time()
+            ultima_vista: Optional[Tuple[str, str]] = None
             confirmado = False
             while not confirmado:
                 grupos = coletor._ler_grupos()
@@ -2062,6 +2113,17 @@ def modo_leitor_json(url: Optional[str]) -> None:
                     emitir(tipo="diagnostico", linhas=linhas[:12])
                     ultimo_diagnostico = time.time()
                 comando = proximo_comando(1.0)
+                # Confirmar sozinho: se há UMA faixa só e ela foi vista em duas leituras
+                # seguidas, confirma como se você tivesse clicado em "Confere".
+                if comando is None and auto_confirmar and len(grupos) == 1:
+                    vista = (grupos[0][0], grupos[0][1])
+                    if vista == ultima_vista:
+                        candidatas = grupos
+                        comando = {"cmd": "confirmar", "indice": 0, "invertida": False}
+                        emitir(tipo="msg", texto="Faixa encontrada e confirmada sozinha.")
+                    ultima_vista = vista
+                elif len(grupos) != 1:
+                    ultima_vista = None
                 if not comando:
                     continue
                 if comando.get("cmd") == "parar":
@@ -2099,10 +2161,15 @@ def modo_leitor_json(url: Optional[str]) -> None:
 class LeitorProcesso:
     """Lado do painel: liga o processo leitor e guarda o que ele manda."""
 
-    def __init__(self, url: Optional[str] = None) -> None:
+    def __init__(self, url: Optional[str] = None, escondido: bool = False, auto_confirmar: bool = False) -> None:
         comando = [sys.executable, "-u", os.path.abspath(__file__), "--leitor-json"]
         if url:
             comando += ["--url", url]
+        if escondido:
+            comando.append("--escondido")
+        if auto_confirmar:
+            comando.append("--auto-confirmar")
+        self.escondido = escondido
         opcoes = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         self.proc = subprocess.Popen(comando, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True, encoding="utf-8",
@@ -2180,6 +2247,31 @@ class LeitorProcesso:
             self.proc.terminate()
 
 
+CONFIG_PAINEL_PADRAO = {"url": "", "escondido": False, "auto_confirmar": True, "iniciar_sozinho": False}
+
+
+def _arquivo_config_painel() -> str:
+    return os.path.join(_pasta_do_robo(), "painel_robo_config.json")
+
+
+def ler_config_painel() -> dict:
+    """Escolhas do modo automático guardadas no PC (endereço da mesa, modo escondido...)."""
+    try:
+        with open(_arquivo_config_painel(), encoding="utf-8") as arq:
+            dados = json.load(arq)
+        return {**CONFIG_PAINEL_PADRAO, **(dados if isinstance(dados, dict) else {})}
+    except (OSError, ValueError):
+        return dict(CONFIG_PAINEL_PADRAO)
+
+
+def salvar_config_painel(dados: dict) -> None:
+    try:
+        with open(_arquivo_config_painel(), "w", encoding="utf-8") as arq:
+            json.dump({**CONFIG_PAINEL_PADRAO, **dados}, arq, ensure_ascii=False, indent=2)
+    except OSError:
+        pass  # sem permissão de escrita: o painel funciona, só não lembra das escolhas
+
+
 class SessaoWeb:
     """Estado único do painel. Fica guardado pelo Streamlit e sobrevive a recarregar a página."""
 
@@ -2192,6 +2284,7 @@ class SessaoWeb:
         self.sim = {"rodando": False, "rng": None, "proximo": 0.0, "rapido": False}
         self.backtest: Optional[dict] = None
         self.aviso: Optional[str] = None
+        self.auto_iniciado = False  # "Começar a ler quando o painel abrir" já foi feito?
 
     # --- sessão e modo -------------------------------------------------------------
     def nova_sessao(self, config: Config) -> None:
@@ -2207,10 +2300,10 @@ class SessaoWeb:
                 self.modo = modo
 
     # --- leitura automática --------------------------------------------------------
-    def iniciar_leitor(self, url: Optional[str]) -> None:
+    def iniciar_leitor(self, url: Optional[str], escondido: bool = False, auto_confirmar: bool = False) -> None:
         with self.trava:
             self.parar_leitor()
-            self.leitor = LeitorProcesso(url or None)
+            self.leitor = LeitorProcesso(url or None, escondido=escondido, auto_confirmar=auto_confirmar)
 
     def parar_leitor(self) -> None:
         with self.trava:
@@ -2617,6 +2710,13 @@ def app_web() -> None:
 
     tem_playwright = importlib.util.find_spec("playwright") is not None
 
+    # "Começar a ler quando o painel abrir": liga a leitura sozinho, uma vez, com as escolhas salvas
+    if no_meu_pc and modo == MODO_AUTO and tem_playwright and not sessao.auto_iniciado:
+        sessao.auto_iniciado = True
+        cfg = ler_config_painel()
+        if cfg["iniciar_sozinho"] and cfg["url"] and sessao.leitor is None:
+            sessao.iniciar_leitor(cfg["url"], escondido=cfg["escondido"], auto_confirmar=cfg["auto_confirmar"])
+
     # --------------------------- cabeçalho -----------------------------------------
     def cabecalho() -> None:
         """Título e status. Nos modos ao vivo ele roda dentro do fragmento e se atualiza sozinho."""
@@ -2697,18 +2797,37 @@ def _controles_auto(st, sessao: SessaoWeb, tem_playwright: bool) -> None:
                 "porque ela usa o seu Chrome. Instale com  py -m pip install playwright  e abra o painel "
                 "pelo atalho. Aqui você pode usar o modo manual, o simulador e o backtest.")
         return
-    c1, c2 = st.columns([4, 1])
     if sessao.leitor_ativo():
-        c1.caption("Leitura ligada. Para trocar de mesa ou recomeçar, pare a leitura e inicie de novo.")
+        c1, c2 = st.columns([4, 1])
+        jeito = "Chrome escondido" if sessao.leitor.escondido else "Chrome com janela"
+        c1.caption(f"Leitura ligada ({jeito}). Para trocar de mesa ou de modo, pare a leitura e inicie de novo.")
         if c2.button("Parar leitura", key="rr_par_leitor"):
             sessao.parar_leitor()
             st.rerun()  # recarrega a página inteira para desligar a atualização automática
-    else:
-        url = c1.text_input("Endereço da mesa (opcional)", key="rr_url",
-                            placeholder="Deixe vazio se a mesa já estiver aberta no Chrome do robô")
-        if c2.button("Iniciar leitura", key="rr_ini_leitor", type="primary"):
-            sessao.iniciar_leitor(url.strip() or None)
-            st.rerun()  # recarrega a página inteira para ligar a atualização automática
+        return
+
+    cfg = ler_config_painel()
+    c1, c2 = st.columns([3, 2])
+    url = c1.text_input("Endereço da mesa", value=cfg["url"], key="rr_url",
+                        placeholder="ex.: https://site-do-cassino/game/immersive-roulette-by-evolution")
+    janela = c2.radio("Chrome do robô", ["Escondido (sem janela)", "Visível (para fazer login)"],
+                      index=0 if cfg["escondido"] else 1, key="rr_janela")
+    c3, c4, c5 = st.columns([2, 2, 1])
+    auto = c3.checkbox("Confirmar a faixa sozinho", value=cfg["auto_confirmar"], key="rr_auto")
+    sozinho = c4.checkbox("Começar a ler quando o painel abrir", value=cfg["iniciar_sozinho"], key="rr_sozinho")
+    if c5.button("Iniciar leitura", key="rr_ini_leitor", type="primary"):
+        escondido = janela.startswith("Escondido")
+        if escondido and not url.strip():
+            st.error("No modo escondido o robô abre a mesa sozinho, então ele precisa do endereço dela. "
+                     "Abra a mesa uma vez no modo Visível, copie o endereço da barra e cole aqui.")
+            return
+        salvar_config_painel({"url": url.strip(), "escondido": escondido,
+                              "auto_confirmar": bool(auto), "iniciar_sozinho": bool(sozinho)})
+        sessao.iniciar_leitor(url.strip() or None, escondido=escondido, auto_confirmar=bool(auto))
+        st.rerun()  # recarrega a página inteira para ligar a atualização automática
+    st.caption("Primeira vez (ou se o login expirar): escolha Visível, faça login na janela que abrir e copie "
+               "o endereço da mesa para cá. Depois, use Escondido: o robô entra na mesa sozinho, sem janela, "
+               "e o Chrome dele fecha quando a leitura para.")
 
 
 def _controles_sim(st, sessao: SessaoWeb) -> None:
