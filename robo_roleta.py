@@ -818,6 +818,7 @@ class ColetorNavegador(ColetorBase):
     Precisa de:  pip install playwright   (usa o Chrome que você já tem instalado)
     """
 
+    NOME_MESA = "Immersive Roulette"
     INTERVALO_LEITURA = 1.0  # segundos entre uma leitura e outra
     EMENDA_MINIMA = 3        # quantos números em comum confirmam onde as leituras se emendam
     TOLERANCIA_SUMICO = 15   # segundos sem achar a faixa antes de procurar de novo
@@ -1136,9 +1137,27 @@ class ColetorNavegador(ColetorBase):
             self._host, self._chave = grupos[0][0], grupos[0][1]
             return  # a próxima leitura já usa a faixa nova (e recupera os giros perdidos)
         if not self._avisou_sumico:
-            exibir("⚠️  Não estou achando a faixa da mesa. Deixe a Immersive Roulette aberta "
+            exibir(f"⚠️  Não estou achando a faixa da mesa. Deixe a {self.NOME_MESA} aberta "
                    "e aparecendo no navegador (pode ficar atrás de outras janelas).")
             self._avisou_sumico = True
+
+    # --- usados pelo processo leitor do painel (iguais para a roleta e o Bac Bo) ------------
+    @staticmethod
+    def visao_candidata(itens: list) -> list:
+        """O que o painel mostra de cada faixa candidata (o primeiro é o mais recente)."""
+        return itens[:15]
+
+    def confirmar_faixa(self, host: str, chave: str, itens: list, invertida: bool = False) -> list:
+        """Fixa a faixa escolhida e devolve o histórico do mais antigo para o mais novo."""
+        faixa = list(reversed(itens)) if invertida else list(itens)
+        self._host, self._chave, self._invertida, self._ultima = host, chave, invertida, faixa
+        self._pendente = None
+        self._fila.clear()
+        return list(reversed(faixa))
+
+    @staticmethod
+    def evento_novo(item) -> dict:
+        return {"tipo": "numero", "n": item}
 
     def obter_proximo_numero(self) -> int:
         while not self._fila:  # lê a mesa até aparecer pelo menos um número novo
@@ -1711,7 +1730,7 @@ def main() -> None:
         args = ler_argumentos(argv)
         if args.leitor_json:  # chamado pelo painel web: lê a mesa e responde em JSON
             veio_do_menu = False
-            modo_leitor_json(args.url, escondido=args.escondido, auto_confirmar=args.auto_confirmar)
+            modo_leitor_json(args.url, escondido=args.escondido, auto_confirmar=args.auto_confirmar, jogo=args.jogo)
             return
         if args.web:
             if abrir_painel_web():
@@ -2056,7 +2075,8 @@ def executar_backtest(giros: int, semente: Optional[int], config: Optional[Confi
     return motor
 
 
-def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar: bool = False) -> None:
+def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar: bool = False,
+                     jogo: str = "roleta") -> None:
     """
     Roda como processo separado, chamado pelo painel com --leitor-json. Lê a mesa pelo
     Chrome (ColetorNavegador) e escreve uma linha JSON por evento:
@@ -2065,6 +2085,7 @@ def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar
         {"tipo": "diagnostico", "linhas": [...]}                    quando não acha nada
         {"tipo": "historico", "numeros": [...]}                     após confirmar a faixa
         {"tipo": "numero", "n": 17}                                 cada número novo
+        {"tipo": "rodada", "r": "P", "soma": 7}                     cada rodada nova (Bac Bo)
         {"tipo": "msg" | "erro" | "fim", ...}
     E recebe comandos JSON pela entrada padrão:
         {"cmd": "confirmar", "indice": 0, "invertida": false} | {"cmd": "procurar"} | {"cmd": "parar"}
@@ -2094,7 +2115,8 @@ def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar
     threading.Thread(target=ler_comandos, daemon=True).start()
     emitir(tipo="fase", fase="conectando")
     try:
-        coletor = ColetorNavegador(url=url, escondido=escondido)
+        classe = ColetorNavegadorBacBo if jogo == "bacbo" else ColetorNavegador
+        coletor = classe(url=url, escondido=escondido)
     except Exception as erro:
         emitir(tipo="erro", texto=str(erro))
         return
@@ -2109,7 +2131,7 @@ def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar
             confirmado = False
             while not confirmado:
                 grupos = coletor._ler_grupos()
-                visao = [numeros[:15] for _host, _chave, numeros in grupos]
+                visao = [coletor.visao_candidata(numeros) for _host, _chave, numeros in grupos]
                 if visao != ultimo_envio:
                     emitir(tipo="candidatas", grupos=visao)
                     ultimo_envio, candidatas = visao, grupos
@@ -2138,12 +2160,7 @@ def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar
                     indice, invertida = int(comando.get("indice", 0)), bool(comando.get("invertida"))
                     if 0 <= indice < len(candidatas):
                         host, chave, numeros = candidatas[indice]
-                        faixa = list(reversed(numeros)) if invertida else list(numeros)
-                        coletor._host, coletor._chave = host, chave
-                        coletor._invertida, coletor._ultima = invertida, faixa
-                        coletor._pendente = None
-                        coletor._fila.clear()
-                        emitir(tipo="historico", numeros=list(reversed(faixa)))
+                        emitir(tipo="historico", numeros=coletor.confirmar_faixa(host, chave, numeros, invertida))
                         confirmado = True
 
             emitir(tipo="fase", fase="lendo")
@@ -2155,7 +2172,7 @@ def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar
                     break  # volta para a calibração
                 coletor._verificar_novos()
                 while coletor._fila:
-                    emitir(tipo="numero", n=coletor._fila.popleft())
+                    emitir(**coletor.evento_novo(coletor._fila.popleft()))
     except PedidoEncerrar:
         emitir(tipo="fim", motivo="O navegador foi fechado.")
     except Exception as erro:
@@ -2167,8 +2184,9 @@ def modo_leitor_json(url: Optional[str], escondido: bool = False, auto_confirmar
 class LeitorProcesso:
     """Lado do painel: liga o processo leitor e guarda o que ele manda."""
 
-    def __init__(self, url: Optional[str] = None, escondido: bool = False, auto_confirmar: bool = False) -> None:
-        comando = [sys.executable, "-u", os.path.abspath(__file__), "--leitor-json"]
+    def __init__(self, url: Optional[str] = None, escondido: bool = False, auto_confirmar: bool = False,
+                 jogo: str = "roleta") -> None:
+        comando = [sys.executable, "-u", os.path.abspath(__file__), "--leitor-json", "--jogo", jogo]
         if url:
             comando += ["--url", url]
         if escondido:
@@ -2211,6 +2229,8 @@ class LeitorProcesso:
                     self._historico = evento.get("numeros", [])
                 elif tipo == "numero":
                     self._numeros.put(int(evento["n"]))
+                elif tipo == "rodada":
+                    self._numeros.put((str(evento.get("r", "")), evento.get("soma")))
                 elif tipo == "erro":
                     self.fase, self.erro = "erro", evento.get("texto", "erro desconhecido")
                 elif tipo == "fim":
@@ -2254,7 +2274,8 @@ class LeitorProcesso:
 
 
 CONFIG_PAINEL_PADRAO = {"url": "", "escondido": False, "auto_confirmar": True, "iniciar_sozinho": False,
-                        "bacbo_padroes_desligados": [], "bacbo_padroes_extras": ""}
+                        "bacbo_padroes_desligados": [], "bacbo_padroes_extras": "",
+                        "bacbo_url": "", "bacbo_escondido": False, "bacbo_auto_confirmar": True}
 
 
 def _arquivo_config_painel() -> str:
@@ -2322,6 +2343,8 @@ class SessaoWeb:
             if self.leitor is not None:
                 self.leitor.parar()
                 self.leitor = None
+            if getattr(self, "bacbo", None) is not None:
+                self.bacbo.parar_leitor()
 
     def leitor_ativo(self) -> bool:
         return self.leitor is not None and self.leitor.ativo()
@@ -2835,44 +2858,54 @@ def app_web() -> None:
     st.fragment(painel_ao_vivo, run_every=1.0 if ao_vivo else None)()
 
 
-def _controles_auto(st, sessao: SessaoWeb, tem_playwright: bool) -> None:
-    """Botões do modo automático. Durante a leitura só aparece 'Parar' (evita reiniciar sem querer)."""
+def _controles_auto(st, sessao, tem_playwright: bool, bacbo: bool = False) -> None:
+    """
+    Botões do modo automático. Durante a leitura só aparece 'Parar' (evita reiniciar sem querer).
+    'sessao' é a SessaoWeb (roleta) ou a SessaoBacBo: as duas têm leitor, iniciar_leitor e parar_leitor.
+    """
     if not tem_playwright:
         # Hospedado na internet (ou sem Playwright instalado) não existe o seu Chrome para ler
         st.info("A leitura automática da mesa funciona só com o robô rodando no seu computador, "
                 "porque ela usa o seu Chrome. Instale com  py -m pip install playwright  e abra o painel "
                 "pelo atalho. Aqui você pode usar o modo manual, o simulador e o backtest.")
         return
+    k = "bb" if bacbo else "rr"          # prefixo das chaves dos botões
+    c_ = "bacbo_" if bacbo else ""       # prefixo das escolhas salvas no arquivo de configuração
     if sessao.leitor_ativo():
         c1, c2 = st.columns([4, 1])
         jeito = "Chrome escondido" if sessao.leitor.escondido else "Chrome com janela"
         c1.caption(f"Leitura ligada ({jeito}). Para trocar de mesa ou de modo, pare a leitura e inicie de novo.")
-        if c2.button("Parar leitura", key="rr_par_leitor"):
+        if c2.button("Parar leitura", key=f"{k}_par_leitor"):
             sessao.parar_leitor()
             st.rerun()  # recarrega a página inteira para desligar a atualização automática
         return
 
     cfg = ler_config_painel()
+    exemplo = "bac-bo-by-evolution" if bacbo else "immersive-roulette-by-evolution"
     c1, c2 = st.columns([3, 2])
-    url = c1.text_input("Endereço da mesa", value=cfg["url"], key="rr_url",
-                        placeholder="ex.: https://site-do-cassino/game/immersive-roulette-by-evolution")
+    url = c1.text_input("Endereço da mesa", value=cfg[c_ + "url"], key=f"{k}_url",
+                        placeholder=f"ex.: https://site-do-cassino/game/{exemplo}")
     janela = c2.radio("Chrome do robô", ["Escondido (sem janela)", "Visível (para fazer login)"],
-                      index=0 if cfg["escondido"] else 1, key="rr_janela")
+                      index=0 if cfg[c_ + "escondido"] else 1, key=f"{k}_janela")
     c3, c4, c5 = st.columns([2, 2, 1])
-    auto = c3.checkbox("Confirmar a faixa sozinho", value=cfg["auto_confirmar"], key="rr_auto")
-    sozinho = c4.checkbox("Começar a ler quando o painel abrir", value=cfg["iniciar_sozinho"], key="rr_sozinho")
-    if c5.button("Iniciar leitura", key="rr_ini_leitor", type="primary"):
+    auto = c3.checkbox("Confirmar a faixa sozinho", value=cfg[c_ + "auto_confirmar"], key=f"{k}_auto")
+    sozinho = False if bacbo else c4.checkbox("Começar a ler quando o painel abrir",
+                                              value=cfg["iniciar_sozinho"], key="rr_sozinho")
+    if c5.button("Iniciar leitura", key=f"{k}_ini_leitor", type="primary"):
         escondido = janela.startswith("Escondido")
         if escondido and not url.strip():
             st.error("No modo escondido o robô abre a mesa sozinho, então ele precisa do endereço dela. "
                      "Abra a mesa uma vez no modo Visível, copie o endereço da barra e cole aqui.")
             return
-        salvar_config_painel({"url": url.strip(), "escondido": escondido,
-                              "auto_confirmar": bool(auto), "iniciar_sozinho": bool(sozinho)})
+        escolhas = {c_ + "url": url.strip(), c_ + "escondido": escondido, c_ + "auto_confirmar": bool(auto)}
+        if not bacbo:
+            escolhas["iniciar_sozinho"] = bool(sozinho)
+        salvar_config_painel(escolhas)
         sessao.iniciar_leitor(url.strip() or None, escondido=escondido, auto_confirmar=bool(auto))
         st.rerun()  # recarrega a página inteira para ligar a atualização automática
-    st.caption("Primeira vez (ou se o login expirar): escolha Visível, faça login na janela que abrir e copie "
-               "o endereço da mesa para cá. Depois, use Escondido: o robô entra na mesa sozinho, sem janela, "
+    mesa = "a mesa de Bac Bo" if bacbo else "a mesa"
+    st.caption(f"Primeira vez (ou se o login expirar): escolha Visível, faça login na janela que abrir, abra {mesa} "
+               "e copie o endereço da barra para cá. Depois, use Escondido: o robô entra na mesa sozinho, sem janela, "
                "e o Chrome dele fecha quando a leitura para.")
 
 
@@ -2890,12 +2923,14 @@ def _controles_sim(st, sessao: SessaoWeb) -> None:
         st.rerun()
 
 
-def _calibracao(st, sessao: SessaoWeb) -> None:
+def _calibracao(st, sessao, bacbo: bool = False) -> None:
     """Na tela: mostra a faixa encontrada para você confirmar (equivale ao Enter do terminal)."""
     leitor = sessao.leitor
+    k = "bb" if bacbo else "rr"
+    mesa = "a mesa de Bac Bo" if bacbo else "a Immersive Roulette"
     if leitor is None:
-        st.info("Clique em **Iniciar leitura**. O robô abre (ou reaproveita) o Chrome dele; faça login, abra a "
-                "Immersive Roulette e a faixa de resultados aparece aqui para você confirmar.")
+        st.info(f"Clique em **Iniciar leitura**. O robô abre (ou reaproveita) o Chrome dele; faça login, abra "
+                f"{mesa} e a faixa de resultados aparece aqui para você confirmar.")
         return
     if leitor.fase == "erro":
         st.error(f"Não consegui ler a mesa: {leitor.erro}")
@@ -2908,20 +2943,26 @@ def _calibracao(st, sessao: SessaoWeb) -> None:
         return
     if leitor.fase == "procurando":
         if not leitor.candidatas:
-            st.info("Procurando a faixa de resultados... Abra a Immersive Roulette na janela do Chrome do robô.")
+            st.info(f"Procurando a faixa de resultados... Abra {mesa} na janela do Chrome do robô.")
             if leitor.diagnostico:
                 with st.expander("Diagnóstico (o que o robô está enxergando)"):
                     st.code("\n".join(leitor.diagnostico))
             return
         st.markdown('<div class="rr-sub" style="margin-top:6px">Faixa encontrada: confira com a mesa '
-                    '(o primeiro número deve ser o último que saiu)</div>', unsafe_allow_html=True)
-        for i, numeros in enumerate(leitor.candidatas):
+                    f'(o primeiro {"resultado" if bacbo else "número"} deve ser o último que saiu)</div>',
+                    unsafe_allow_html=True)
+        for i, itens in enumerate(leitor.candidatas):
             c1, c2, c3 = st.columns([5, 1, 1])
-            c1.markdown('<div class="rr-pedras">' + "".join(Html.pedra(n, "pq") for n in numeros) + "</div>",
-                        unsafe_allow_html=True)
-            if c2.button("Confere", key=f"rr_conf_{i}", type="primary"):
+            if bacbo:
+                desenho = "".join(HtmlBacBo.chip(RodadaBacBo.do_resultado(r, _soma_valida(soma)), "pq")
+                                  for r, soma in itens)
+            else:
+                desenho = "".join(Html.pedra(n, "pq") for n in itens)
+            c1.markdown(f'<div class="rr-pedras">{desenho}</div>', unsafe_allow_html=True)
+            if c2.button("Confere", key=f"{k}_conf_{i}", type="primary"):
                 leitor.enviar(cmd="confirmar", indice=i, invertida=False)
-            if c3.button("Invertida", key=f"rr_inv_{i}"):
+            # No Bac Bo a ordem vem da posição das bolinhas no quadro, então não existe "invertida"
+            if not bacbo and c3.button("Invertida", key=f"rr_inv_{i}"):
                 leitor.enviar(cmd="confirmar", indice=i, invertida=True)
         return
     if leitor.fase == "lendo":
@@ -2929,7 +2970,7 @@ def _calibracao(st, sessao: SessaoWeb) -> None:
         if leitor.mensagens:
             hora, texto = leitor.mensagens[-1]
             c1.caption(f"Última mensagem do leitor ({hora}): {texto}")
-        if c2.button("Procurar faixa de novo", key="rr_procurar"):
+        if c2.button("Procurar faixa de novo", key=f"{k}_procurar"):
             leitor.enviar(cmd="procurar")
 
 
@@ -3428,6 +3469,259 @@ def _tamanho_gatilho(chave: str) -> int:
     return TAMANHO_GATILHO_BACBO.get(chave, 3)
 
 
+# -----------------------------------------------------------------------------------
+# Leitura automática da mesa de Bac Bo
+# -----------------------------------------------------------------------------------
+# Na mesa da Evolution, o quadro de baixo à esquerda (o "bead road") tem uma bolinha por
+# rodada, preenchido de cima para baixo e da esquerda para a direita. Cada bolinha é um SVG:
+#     <g data-type="roadItemColor" fill="#2F63DF"> ... </g>  <text>P</text>
+# A cor diz quem ganhou (azul = Player, vermelho = Banker, dourado/verde = Empate) e o texto
+# mostra a letra (P, B, T) ou, se você clicar no quadro, a soma dos dados.
+# O script acha as bolinhas, junta as do mesmo quadro e põe em ordem pela POSIÇÃO na tela
+# (coluna por coluna, de cima para baixo). Assim ele não depende de como a Evolution
+# organiza o código por dentro, só do data-type, que é um nome legível e estável.
+JS_LER_BACBO = r"""
+() => {
+    const SELETOR = '[data-type="roadItemColor"]';
+    const visivel = el => el.getClientRects().length > 0;
+    const raizes = [document];
+    for (let i = 0; i < raizes.length; i++) {
+        for (const el of raizes[i].querySelectorAll('*')) {
+            if (el.shadowRoot) raizes.push(el.shadowRoot);
+        }
+    }
+    let total = 0, visiveis = 0;
+    const blocos = new Set();
+    for (const raiz of raizes) {
+        for (const el of raiz.querySelectorAll(SELETOR)) {
+            total++;
+            if (!visivel(el)) continue;
+            visiveis++;
+            // sobe até o menor bloco com 7+ bolinhas (uma coluna sozinha tem no máximo 6)
+            let bloco = el.parentElement;
+            while (bloco && bloco.querySelectorAll(SELETOR).length < 7) bloco = bloco.parentElement;
+            if (bloco) blocos.add(bloco);
+        }
+    }
+    const finais = [...blocos].filter(b => ![...blocos].some(o => o !== b && b.contains(o)));
+    const grupos = finais.map(bloco => {
+        const lista = [];
+        for (const el of bloco.querySelectorAll(SELETOR)) {
+            if (!visivel(el)) continue;
+            // o texto da bolinha: sobe enquanto o pedaço ainda for só desta bolinha
+            let caixa = el.parentElement, texto = null;
+            while (caixa && caixa !== bloco && caixa.querySelectorAll(SELETOR).length === 1) {
+                texto = caixa.querySelector('text');
+                if (texto) break;
+                caixa = caixa.parentElement;
+            }
+            const r = el.getBoundingClientRect();
+            const pintado = el.querySelector('[fill]');
+            lista.push({x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width || 1,
+                        t: texto ? texto.textContent.trim() : '',
+                        f: el.getAttribute('fill') || (pintado ? pintado.getAttribute('fill') : '') || '',
+                        s: el.getAttribute('stroke') || ''});
+        }
+        // ordem do quadro: coluna por coluna (esquerda -> direita), de cima para baixo
+        lista.sort((a, b) => a.x - b.x);
+        const colunas = [];
+        for (const it of lista) {
+            const ultima = colunas[colunas.length - 1];
+            if (ultima && Math.abs(it.x - ultima.x) < Math.max(2, it.w * 0.45)) ultima.itens.push(it);
+            else colunas.push({x: it.x, itens: [it]});
+        }
+        const itens = [];
+        for (const col of colunas) {
+            col.itens.sort((a, b) => a.y - b.y);
+            for (const it of col.itens) itens.push([it.t, it.f, it.s]);
+        }
+        const nomeClasse = typeof bloco.className === 'string' ? bloco.className
+                         : (bloco.className && bloco.className.baseVal) || '';
+        return {chave: bloco.tagName + '|' + (bloco.getAttribute('data-type') || bloco.getAttribute('data-role') || '')
+                       + '|' + nomeClasse, itens: itens};
+    });
+    return {total: total, visiveis: visiveis, grupos: grupos};
+}
+"""
+
+LETRAS_BACBO = {"P": PLAYER, "J": PLAYER, "B": BANKER, "T": EMPATE, "E": EMPATE}
+
+
+def _ler_cor(cor: str) -> Optional[Tuple[int, int, int]]:
+    """'#2F63DF', '#26d' ou 'rgb(47, 99, 223)' -> (47, 99, 223)."""
+    cor = (cor or "").strip().lower()
+    try:
+        if cor.startswith("#"):
+            hexa = cor[1:]
+            if len(hexa) in (3, 4):
+                hexa = "".join(c * 2 for c in hexa[:3])
+            return int(hexa[0:2], 16), int(hexa[2:4], 16), int(hexa[4:6], 16)
+        if cor.startswith("rgb"):
+            partes = cor[cor.index("(") + 1:cor.index(")")].replace("/", ",").split(",")
+            return tuple(int(float(p)) for p in partes[:3])  # type: ignore[return-value]
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def _lado_pela_cor(cor: str) -> Optional[str]:
+    """Azul = Player, vermelho = Banker, dourado/amarelo/verde = Empate."""
+    rgb = _ler_cor(cor)
+    if rgb is None:
+        return None
+    r, g, b = rgb
+    if r > b + 50 and g > b + 30 and g >= 0.55 * r:
+        return EMPATE   # dourado / amarelo
+    if g > r + 30 and g > b + 30:
+        return EMPATE   # verde
+    if b > r + 30 and b >= g:
+        return PLAYER
+    if r > g + 50 and r > b + 30:
+        return BANKER
+    return None
+
+
+def _soma_valida(soma) -> Optional[int]:
+    try:
+        soma = int(soma)
+    except (TypeError, ValueError):
+        return None
+    return soma if 2 <= soma <= 12 else None
+
+
+def _item_bacbo(texto: str, preenchimento: str, contorno: str) -> Optional[Tuple[str, Optional[int]]]:
+    """Uma bolinha do quadro -> (resultado, soma). None se não der para saber quem ganhou."""
+    texto = (texto or "").strip().upper()
+    soma = _soma_valida(texto) if texto.isdigit() else None
+    lado = LETRAS_BACBO.get(texto)
+    if lado is None:
+        cor = preenchimento if preenchimento and preenchimento.lower() not in ("none", "transparent") else contorno
+        lado = _lado_pela_cor(cor)
+    return (lado, soma) if lado else None
+
+
+class ColetorNavegadorBacBo(ColetorNavegador):
+    """
+    Lê a mesa de Bac Bo pelo mesmo Chrome do robô (mesma conexão, perfil, modo escondido etc.).
+    A faixa é o quadro de bolinhas da mesa, sempre do mais antigo para o mais novo.
+    """
+
+    NOME_MESA = "mesa de Bac Bo"
+    MINIMO_QUADRO = 7      # bolinhas mínimas para um quadro contar
+    EMENDA_MINIMA = 8      # rodadas em comum para confirmar onde duas leituras se emendam
+
+    def _ler_grupos(self, so_do_host: Optional[str] = None,
+                    diagnostico: Optional[List[str]] = None) -> List[Tuple[str, str, list]]:
+        desconectado = self._navegador is not None and not self._navegador.is_connected()
+        paginas = [] if desconectado else self._contexto.pages
+        if not paginas:
+            exibir("\n🌐 O navegador foi fechado.")
+            raise PedidoEncerrar()
+        grupos: List[Tuple[str, str, list]] = []
+        vistos = set()
+        for n_aba, pagina in enumerate(paginas, start=1):
+            for frame in pagina.frames:
+                host = urlparse(frame.url).netloc
+                if so_do_host is not None and host != so_do_host:
+                    continue
+                try:
+                    leitura = frame.evaluate(JS_LER_BACBO)
+                except self._ErroPlaywright as erro:
+                    if diagnostico is not None and host:
+                        diagnostico.append(f"aba {n_aba} | {host}: não consegui ler "
+                                           f"({str(erro).splitlines()[0][:70]})")
+                    continue
+                if diagnostico is not None and (leitura["total"] or not diagnostico):
+                    tamanhos = [len(g["itens"]) for g in leitura["grupos"]]
+                    diagnostico.append(f"aba {n_aba} | {host or '(vazio)'}: {leitura['total']} bolinhas "
+                                       f"no código, {leitura['visiveis']} visíveis, quadros {tamanhos}")
+                for grupo in leitura["grupos"]:
+                    brutos = grupo["itens"]
+                    itens = [_item_bacbo(*b) for b in brutos]
+                    com_texto = sum(1 for b in brutos if b[0])
+                    # O quadro certo tem letra ou soma em todas as bolinhas e todas com cor conhecida
+                    # (os outros quadros da mesa usam bolinhas vazadas, sem texto).
+                    if len(itens) < self.MINIMO_QUADRO or None in itens or com_texto < 0.8 * len(itens):
+                        continue
+                    if (host, grupo["chave"]) in vistos:
+                        continue
+                    vistos.add((host, grupo["chave"]))
+                    grupos.append((host, grupo["chave"], [list(i) for i in itens]))
+        return grupos
+
+    @staticmethod
+    def visao_candidata(itens: list) -> list:
+        return list(reversed(itens[-20:]))  # as 20 últimas, a mais recente primeiro
+
+    def confirmar_faixa(self, host: str, chave: str, itens: list, invertida: bool = False) -> list:
+        self._host, self._chave, self._invertida, self._ultima = host, chave, False, list(itens)
+        self._pendente = None
+        self._fila.clear()
+        return list(itens)  # já vem do mais antigo para o mais novo
+
+    @staticmethod
+    def evento_novo(item) -> dict:
+        return {"tipo": "rodada", "r": item[0], "soma": item[1]}
+
+    @classmethod
+    def calcular_novos_bacbo(cls, anterior: List[str], atual: List[str]) -> Optional[int]:
+        """
+        Quantas rodadas novas entraram no fim do quadro (as listas vão do mais antigo ao mais novo).
+        Quando o quadro enche, a coluna mais antiga sai pela esquerda; por isso procura o menor
+        'k' (rodadas que saíram pelo começo) em que o resto da leitura anterior abre a atual:
+            anterior P B B P E P  e  atual P B B P E P B        ->  1
+            anterior P B B P E P  e  atual B P E P B (saiu 2)   ->  1
+        Devolve None se não achar a emenda (quadro reiniciou ou leitura muito atrasada).
+        """
+        if atual == anterior:
+            return 0
+        for k in range(len(anterior)):
+            sobra = anterior[k:]
+            if len(sobra) < cls.EMENDA_MINIMA:
+                break
+            if atual[:len(sobra)] == sobra:
+                return len(atual) - len(sobra)
+        return None
+
+    def _verificar_novos(self) -> None:
+        atual = self._ler_faixa_escolhida()
+        if atual is None:
+            self._tratar_faixa_sumida()
+            return
+        if self._avisou_sumico:
+            exibir("✅ Quadro de resultados encontrado de novo.")
+        self._sumiu_desde, self._avisou_sumico = None, False
+        if atual == self._ultima:
+            self._pendente = None
+            return
+        if atual != self._pendente:  # só aceita a mudança depois de duas leituras iguais
+            self._pendente = atual
+            return
+        self._pendente = None
+        novos = self.calcular_novos_bacbo([i[0] for i in self._ultima], [i[0] for i in atual])
+        if novos is None:
+            exibir("⚠️  Perdi a sequência do quadro (a mesa recarregou ou o quadro reiniciou). "
+                   "Vou considerar só a última rodada.")
+            novos = 1 if atual else 0
+        self._ultima = atual
+        if novos:
+            self._fila.extend(atual[-novos:])
+
+
+def _novos_depois_de(anterior: List[str], atual: List[str]) -> Optional[int]:
+    """
+    Painel: a faixa foi confirmada de novo no meio da sessão. Acha onde as últimas rodadas
+    que o painel já tinha aparecem no quadro e devolve a posição a partir da qual são novas.
+    """
+    m = len(anterior)
+    if m < ColetorNavegadorBacBo.EMENDA_MINIMA:
+        return None
+    for fim in range(len(atual), m - 1, -1):  # a ocorrência mais recente vale
+        if atual[fim - m:fim] == anterior:
+            return fim
+    return None
+
+
 class SessaoBacBo:
     """Estado do Bac Bo no painel: sessão manual/simulador, padrões ligados e o último backtest."""
 
@@ -3444,6 +3738,22 @@ class SessaoBacBo:
         self.motor = MotorBacBo(self.config, self.padroes)
         self.sim = {"rodando": False, "dados": None, "rng": None, "proximo": 0.0, "rapido": False}
         self.backtest: Optional[dict] = None
+        self.leitor: Optional[LeitorProcesso] = None
+
+    # --- leitura automática (mesmos nomes da SessaoWeb, para reaproveitar os controles) ---
+    def iniciar_leitor(self, url: Optional[str], escondido: bool = False, auto_confirmar: bool = False) -> None:
+        with self.trava:
+            self.parar_leitor()
+            self.leitor = LeitorProcesso(url or None, escondido=escondido, auto_confirmar=auto_confirmar, jogo="bacbo")
+
+    def parar_leitor(self) -> None:
+        with self.trava:
+            if self.leitor is not None:
+                self.leitor.parar()
+                self.leitor = None
+
+    def leitor_ativo(self) -> bool:
+        return self.leitor is not None and self.leitor.ativo()
 
     # --- padrões -------------------------------------------------------------------
     def _montar_padroes(self) -> List[PadraoBacBo]:
@@ -3483,6 +3793,21 @@ class SessaoBacBo:
 
     def tick(self) -> None:
         with self.trava:
+            if self.leitor is not None:
+                historico = self.leitor.pegar_historico()
+                if historico:
+                    rodadas = [RodadaBacBo.do_resultado(r, _soma_valida(soma)) for r, soma in historico]
+                    if self.motor.total_rodadas == 0 and not self.motor.historico:
+                        _carregar_historico_bacbo(self.motor, rodadas[-self.config.tamanho_historico:])
+                    else:
+                        # Faixa confirmada de novo no meio da sessão: processa só o que saiu nesse intervalo
+                        inicio = _novos_depois_de([r.resultado for r in self.motor.historico],
+                                                  [r.resultado for r in rodadas])
+                        for rodada in rodadas[inicio:] if inicio is not None else []:
+                            self.motor.processar(rodada)
+                for resultado, soma in self.leitor.pegar_numeros():
+                    if resultado in (PLAYER, BANKER, EMPATE):
+                        self.motor.processar(RodadaBacBo.do_resultado(resultado, _soma_valida(soma)))
             if self.sim["rodando"]:
                 agora, feitos = time.time(), 0
                 while agora >= self.sim["proximo"] and feitos < 30:
@@ -3685,9 +4010,14 @@ def _padroes_bacbo(st, bacbo: SessaoBacBo) -> None:
                    f"Ligados agora: {len(bacbo.padroes)}.")
 
 
-def _cabecalho_bacbo(st, bacbo: SessaoBacBo, modo: str) -> None:
-    if modo == MODO_AUTO:
-        status = ("Em preparação", "alerta")
+def _cabecalho_bacbo(st, bacbo: SessaoBacBo, modo: str, tem_playwright: bool = True) -> None:
+    if modo == MODO_AUTO and not tem_playwright:
+        status = ("Só no computador", "alerta")
+    elif modo == MODO_AUTO:
+        fase = bacbo.leitor.fase if bacbo.leitor else None
+        status = {"iniciando": ("Conectando ao Chrome", "alerta"), "conectando": ("Conectando ao Chrome", "alerta"),
+                  "procurando": ("Procurando o quadro", "alerta"), "lendo": ("Lendo a mesa ao vivo", "on"),
+                  "erro": ("Erro na leitura", ""), "fim": ("Leitura encerrada", "")}.get(fase, ("Parado", ""))
     elif modo == MODO_SIM:
         status = ("Simulando", "on") if bacbo.sim["rodando"] else ("Pausado", "")
     elif modo == MODO_MANUAL:
@@ -3715,24 +4045,24 @@ def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: C
         _tela_backtest_bacbo(st, bacbo, config_tela, demonstracao)
         return
 
-    if modo == MODO_AUTO:
-        _cabecalho_bacbo(st, bacbo, modo)
-        st.info("A leitura automática da mesa de Bac Bo ainda está em preparação: falta o robô aprender onde a mesa "
-                "mostra os resultados. Enquanto isso, use o modo manual (você clica em quem ganhou cada rodada), "
-                "o simulador ou o backtest.")
-        return
-
+    tem_playwright = importlib.util.find_spec("playwright") is not None
     if modo == MODO_MANUAL:
         _cabecalho_bacbo(st, bacbo, modo)
         _tela_manual_bacbo(st, bacbo)
 
-    ao_vivo = bacbo.sim["rodando"]
+    ao_vivo = bacbo.leitor_ativo() or bacbo.sim["rodando"]
 
     def painel_bacbo() -> None:
         bacbo.tick()
-        if modo == MODO_SIM:
-            _cabecalho_bacbo(st, bacbo, modo)
-            _controles_sim_bacbo(st, bacbo)
+        if modo in (MODO_AUTO, MODO_SIM):
+            # cabeçalho e controles dentro do fragmento: o status acompanha a leitura em tempo real
+            _cabecalho_bacbo(st, bacbo, modo, tem_playwright)
+            if modo == MODO_AUTO:
+                _controles_auto(st, bacbo, tem_playwright, bacbo=True)
+            else:
+                _controles_sim_bacbo(st, bacbo)
+        if modo == MODO_AUTO and tem_playwright:
+            _calibracao(st, bacbo, bacbo=True)
         motor = bacbo.motor
         st.markdown(HtmlBacBo.cartoes(motor), unsafe_allow_html=True)
         st.markdown(HtmlBacBo.faixa(motor.historico), unsafe_allow_html=True)
