@@ -2529,6 +2529,7 @@ class Html:
                           f"color:#fff!important;border:0!important;min-height:44px;font-family:var(--rr-mono);font-weight:700;"
                           f"box-shadow:0 4px 0 {borda},0 8px 12px rgba(0,0,0,.45)!important;transition:transform .08s ease;}}"
                           f".st-key-rr_num_{n} button:active{{transform:translateY(3px);box-shadow:0 1px 0 {borda}!important;}}")
+        regras.append(_css_lobby_e_som())  # lobby 3D e o componente de som (seção 13)
         return "<style>" + "".join(regras) + "</style>"
 
     @staticmethod
@@ -2721,17 +2722,27 @@ def app_web() -> None:
             st.session_state["rr_sessao"] = SessaoWeb()
         sessao = st.session_state["rr_sessao"]
 
+    # --------------------------- lobby ou painel -----------------------------------
+    no_lobby = _tela_inicial(st, sessao, no_meu_pc) == "lobby"
+    jogo = st.session_state.get("rr_jogo_escolhido", JOGO_ROLETA)
+    e_bacbo = jogo == JOGO_BACBO
+    bacbo = obter_bacbo(sessao, no_meu_pc) if e_bacbo and not no_lobby else None
+    modo, config_tela = MODO_AUTO, None
+
     # --------------------------- barra lateral -------------------------------------
     with st.sidebar:
-        marca = st.container()  # a marca fica no topo, mas depende do jogo escolhido logo abaixo
-        jogo = st.radio("Jogo", [JOGO_ROLETA, JOGO_BACBO], key="rr_jogo", horizontal=True)
-        e_bacbo = jogo == JOGO_BACBO
-        sub = ("Bac Bo (Evolution)" if e_bacbo else "Roleta europeia") + ("" if no_meu_pc else " · banca fictícia")
-        marca.markdown(f'<div class="rr-marca{" bb" if e_bacbo else ""}"><i></i>'
-                       f'{"Robô de Bac Bo" if e_bacbo else "Robô de Roleta"}</div><div class="rr-sub">{sub}</div>',
-                       unsafe_allow_html=True)
-        bacbo = obter_bacbo(sessao, no_meu_pc) if e_bacbo else None
-        if no_meu_pc:
+        if no_lobby:
+            st.markdown('<div class="rr-marca lb"><i></i>Robô de Sinais</div>'
+                        '<div class="rr-sub">Roleta · Bac Bo</div>', unsafe_allow_html=True)
+        else:
+            sub = ("Bac Bo (Evolution)" if e_bacbo else "Roleta europeia") + ("" if no_meu_pc else " · banca fictícia")
+            st.markdown(f'<div class="rr-marca{" bb" if e_bacbo else ""}"><i></i>'
+                        f'{"Robô de Bac Bo" if e_bacbo else "Robô de Roleta"}</div><div class="rr-sub">{sub}</div>',
+                        unsafe_allow_html=True)
+            st.button("◀  Voltar ao lobby", key="rr_lobby", on_click=_ir_para_lobby)
+        if no_lobby:
+            pass
+        elif no_meu_pc:
             # No seu PC: só o jogo, a banca e o botão Entrar. A mesa é lida sozinha.
             modo = MODO_AUTO
             config_tela = _banca_lateral(st, bacbo if bacbo is not None else sessao, bacbo is not None)
@@ -2768,6 +2779,7 @@ def app_web() -> None:
                         sessao.nova_sessao(config_tela)
             st.markdown('<div class="rr-nota">O robô só observa. Nenhuma aposta é feita: '
                         'todos os valores são de uma banca fictícia.</div>', unsafe_allow_html=True)
+        som = {} if no_lobby else _som_lateral(st)
         # Só no seu PC: hospedado, um visitante não pode desligar o site nem trocar o código
         atualizar = no_meu_pc and st.button("Atualizar robô", key="rr_atualizar")
         desligar = no_meu_pc and st.button("Desligar o painel", key="rr_desligar")
@@ -2803,11 +2815,15 @@ def app_web() -> None:
         threading.Timer(1.5, lambda: os._exit(0)).start()  # dá tempo da mensagem chegar ao navegador
         st.stop()
 
+    if no_lobby:
+        tela_lobby(st, sessao, no_meu_pc)
+        return
+
     # Trocar de jogo conta como trocar de modo: pausa a leitura e o simulador (as sessões ficam guardadas)
     sessao.trocar_modo(f"{jogo} · {modo}")
 
     if bacbo is not None:
-        app_bacbo(st, bacbo, modo, no_meu_pc, config_tela)
+        app_bacbo(st, bacbo, modo, no_meu_pc, config_tela, som)
         return
 
     tem_playwright = importlib.util.find_spec("playwright") is not None
@@ -2884,6 +2900,7 @@ def app_web() -> None:
         st.markdown(Html.feed(motor, limite=12), unsafe_allow_html=True)
         _botao_salvar(st, csv_sessao_roleta(motor), "roleta", "rr")
         st.markdown(Html.grafico_curva(motor.curva, "Banca da sessão"), unsafe_allow_html=True)
+        _tocar_sons(st, _eventos_som_roleta(motor, som))
 
     # O fragmento redesenha só esta parte a cada 1 s enquanto há leitura ou simulação,
     # sem recarregar a página inteira (a leitura em si acontece no processo separado).
@@ -4280,7 +4297,8 @@ def _cabecalho_bacbo(st, bacbo: SessaoBacBo, modo: str, tem_playwright: bool = T
                 f'<span class="rr-status {status[1]}"><i></i>{status[0]}</span></div>', unsafe_allow_html=True)
 
 
-def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: ConfigBacBo) -> None:
+def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: ConfigBacBo,
+              som: Optional[dict] = None) -> None:
     """A tela do Bac Bo, chamada pelo app_web quando o jogo escolhido é o Bac Bo."""
     if modo == MODO_BACKTEST:
         _cabecalho_bacbo(st, bacbo, modo)
@@ -4325,6 +4343,7 @@ def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: C
         _botao_salvar(st, csv_sessao_bacbo(motor), "bacbo", "bb")
         st.markdown(Html.grafico_curva(motor.curva, "Banca da sessão", "rodadas", HtmlBacBo.PREVISTO),
                     unsafe_allow_html=True)
+        _tocar_sons(st, _eventos_som_bacbo(motor, som))
 
     st.fragment(painel_bacbo, run_every=1.0 if ao_vivo else None)()
 
@@ -4441,6 +4460,295 @@ def _tela_backtest_bacbo(st, bacbo: SessaoBacBo, config_tela: ConfigBacBo, demon
     st.markdown(Html.grafico_curva(motor.curva, "Banca no backtest", "rodadas", HtmlBacBo.PREVISTO), unsafe_allow_html=True)
     st.markdown(HtmlBacBo.tabela(motor.banca, resultado["padroes"], "Desempenho por padrão no backtest"),
                 unsafe_allow_html=True)
+
+
+# ===================================================================================
+# 13) LOBBY 3D E SOM DOS SINAIS
+# -----------------------------------------------------------------------------------
+# Lobby: a primeira tela do painel, para escolher a mesa. Tudo em CSS 3D (roleta girando
+# e dados rolando), sem bibliotecas e sem JavaScript, então funciona no Markdown do Streamlit.
+# Som: um componente HTML invisível que toca com a Web Audio API do navegador (nenhum
+# arquivo de áudio). Cada som tem uma identidade guardada no navegador, para nunca tocar
+# duas vezes o mesmo sinal, mesmo que a tela seja redesenhada.
+# ===================================================================================
+RODA_EUROPEIA = [0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5,
+                 24, 16, 33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26]
+PONTOS_DADO = {1: [(50, 50)], 2: [(28, 28), (72, 72)], 3: [(26, 26), (50, 50), (74, 74)],
+               4: [(28, 28), (72, 28), (28, 72), (72, 72)],
+               5: [(28, 28), (72, 28), (50, 50), (28, 72), (72, 72)],
+               6: [(28, 24), (72, 24), (28, 50), (72, 50), (28, 76), (72, 76)]}
+FACES_DADO = {"f1": (1, "translateZ(37px)"), "f2": (3, "rotateY(90deg) translateZ(37px)"),
+              "f3": (6, "rotateY(180deg) translateZ(37px)"), "f4": (4, "rotateY(-90deg) translateZ(37px)"),
+              "f5": (2, "rotateX(90deg) translateZ(37px)"), "f6": (5, "rotateX(-90deg) translateZ(37px)")}
+
+
+def _css_lobby_e_som() -> str:
+    passo = 360 / 37
+    cores = {"v": "#c8102e", "p": "#15171c", "z": "#0b8a4a"}
+    casas = ",".join(f"{cores[Html.tipo_cor(n)]} {i * passo:.3f}deg {(i + 1) * passo:.3f}deg"
+                     for i, n in enumerate(RODA_EUROPEIA))
+    regras = [
+        # o componente de som não ocupa espaço na tela
+        ".element-container:has(iframe[height='0']),[data-testid='stElementContainer']:has(iframe[height='0'])"
+        "{position:absolute!important;width:0!important;height:0!important;overflow:hidden!important;margin:0!important;}",
+        ".rr-marca.lb i{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0,rgba(255,255,255,0) 35%),"
+        "conic-gradient(var(--rr-red) 0 25%,#2f6fff 0 50%,var(--rr-gold) 0 75%,var(--rr-green) 0);}",
+        # topo do lobby
+        ".lb-topo{text-align:center;margin:6px 0 34px;}",
+        ".lb-titulo{font-family:var(--rr-display);font-weight:800;font-size:clamp(2.3rem,5.2vw,3.8rem);letter-spacing:-.035em;"
+        "line-height:1;color:var(--rr-ink);margin:8px 0 12px;text-shadow:0 1px 0 #c3c7d0,0 2px 0 #9aa0ab,0 3px 0 #737985,"
+        "0 4px 0 #555b66,0 5px 0 #3c414b,0 6px 0 #2b2f37,0 14px 24px rgba(0,0,0,.85);}",
+        ".lb-sub{font-family:var(--rr-mono);font-size:.82rem;color:var(--rr-ink2);letter-spacing:.02em;}",
+        # cartões das mesas, inclinados um para o outro
+        ".lb-card{position:relative;border-radius:22px;padding:18px 22px 20px;background:linear-gradient(160deg,#1d2333,#111520 60%,#0d1018);"
+        "border:1px solid var(--rr-line);box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 8px 0 -2px #090b10,0 34px 50px -24px rgba(0,0,0,.95);"
+        "transform:perspective(1300px) rotateY(var(--ry,0deg)) rotateX(3deg);transition:transform .5s cubic-bezier(.2,.8,.2,1),box-shadow .5s;"
+        "overflow:hidden;margin-bottom:16px;}",
+        ".lb-card:hover{transform:perspective(1300px) rotateY(0deg) rotateX(0deg) translateY(-6px);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),"
+        "0 12px 0 -2px #090b10,0 40px 60px -22px rgba(0,0,0,.95),0 0 46px -8px var(--lb-brilho);}",
+        ".lb-card::before{content:'';position:absolute;inset:0 0 auto 0;height:3px;background:var(--lb-faixa);}",
+        ".lb-roleta{--ry:9deg;--lb-brilho:rgba(255,45,75,.55);--lb-faixa:linear-gradient(90deg,var(--rr-red),#16181e,var(--rr-green));}",
+        ".lb-bacbo{--ry:-9deg;--lb-brilho:rgba(47,111,255,.55);--lb-faixa:linear-gradient(90deg,#2f6fff,var(--rr-gold),var(--rr-red));}",
+        ".lb-cena{height:260px;display:grid;place-items:center;perspective:760px;position:relative;}",
+        ".lb-cena::after{content:'';position:absolute;left:20%;right:20%;bottom:20px;height:30px;border-radius:50%;"
+        "background:radial-gradient(closest-side,rgba(0,0,0,.7),transparent);filter:blur(5px);}",
+        # roleta 3D: prato com as 37 casas na ordem da roda europeia, torre no meio e a bolinha
+        ".lb-mesa{position:relative;width:210px;height:210px;transform-style:preserve-3d;transform:rotateX(60deg);z-index:1;}",
+        f".lb-roda{{position:absolute;inset:0;border-radius:50%;transform-style:preserve-3d;animation:lb-gira 11s linear infinite;"
+        f"background:radial-gradient(circle,transparent 0 60%,rgba(0,0,0,.35) 60.5% 61.5%,transparent 62%),"
+        f"repeating-conic-gradient(rgba(212,171,85,.6) 0 .7deg,transparent .7deg {passo:.4f}deg),conic-gradient({casas});"
+        f"box-shadow:0 0 0 9px #5a3d1c,0 0 0 13px #d4ab55,0 0 0 16px #6d4f1c;}}",
+        ".lb-roda::before{content:'';position:absolute;inset:30%;border-radius:50%;"
+        "background:radial-gradient(circle at 40% 35%,#8a5f2c,#4a3115 65%,#2d1d0b);box-shadow:0 0 0 3px #d4ab55;}",
+        ".lb-roda::after{content:'';position:absolute;inset:-16px;border-radius:50%;background:linear-gradient(#3a2610,#120b04);"
+        "transform:translateZ(-20px);}",
+        ".lb-torre{position:absolute;left:50%;top:50%;width:38px;height:38px;margin:-19px 0 0 -19px;border-radius:50%;"
+        "background:radial-gradient(circle at 35% 30%,#fff5cf,#d4ab55 45%,#6d4f12);transform:translateZ(18px);"
+        "box-shadow:0 0 14px rgba(212,171,85,.55);}",
+        ".lb-orbita{position:absolute;inset:0;transform-style:preserve-3d;animation:lb-gira-inv 2.8s linear infinite;}",
+        ".lb-orbita i{position:absolute;left:50%;top:4%;width:15px;height:15px;margin-left:-7.5px;border-radius:50%;"
+        "background:radial-gradient(circle at 35% 30%,#fff,#d5d9e0 55%,#7d838e);transform:translateZ(7px);"
+        "box-shadow:0 0 8px rgba(255,255,255,.7);}",
+        "@keyframes lb-gira{to{transform:rotateZ(360deg)}}",
+        "@keyframes lb-gira-inv{to{transform:rotateZ(-360deg)}}",
+        # dados 3D (azul do Player, vermelho do Banker)
+        ".lb-dados{display:flex;gap:54px;position:relative;z-index:1;}",
+        ".lb-dado{width:74px;height:74px;position:relative;transform-style:preserve-3d;animation:lb-rola 7s linear infinite;}",
+        ".lb-dado.b{animation-duration:9.5s;animation-direction:reverse;}",
+        ".lb-dado span{position:absolute;inset:0;border-radius:14px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.16),inset 0 -8px 14px rgba(0,0,0,.35);}",
+        ".lb-dado.p span{background-color:#2f63df;}.lb-dado.b span{background-color:#d9262e;}",
+        "@keyframes lb-rola{0%{transform:rotateX(-20deg) rotateY(0deg) rotateZ(0deg)}"
+        "50%{transform:rotateX(200deg) rotateY(360deg) rotateZ(90deg)}100%{transform:rotateX(340deg) rotateY(720deg) rotateZ(360deg)}}",
+        # textos do cartão
+        ".lb-info{display:grid;gap:6px;position:relative;z-index:1;}",
+        ".lb-nome{font-family:var(--rr-display);font-weight:800;font-size:1.65rem;letter-spacing:-.02em;color:var(--rr-ink);}",
+        ".lb-desc{font-size:.92rem;color:var(--rr-ink2);}",
+        ".lb-linha{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}",
+        ".lb-pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--rr-mono);font-size:.74rem;padding:5px 11px;"
+        "border-radius:999px;background:var(--rr-surface2);border:1px solid var(--rr-line);color:var(--rr-ink2);}",
+        ".lb-pill i{width:7px;height:7px;border-radius:50%;background:var(--rr-muted);}",
+        ".lb-pill.on{color:var(--rr-good);border-color:rgba(47,209,122,.4);}.lb-pill.on i{background:var(--rr-green);animation:rr-ping 1.6s infinite;}",
+        ".lb-rodape{text-align:center;font-size:.82rem;color:var(--rr-muted);margin-top:18px;}",
+        # botões de entrar, com cara de tecla
+        ".st-key-lb_roleta button,.st-key-lb_bacbo button{width:100%;min-height:58px;border-radius:14px!important;border:0!important;"
+        "transition:transform .08s ease,box-shadow .08s ease;}",
+        ".st-key-lb_roleta button p,.st-key-lb_bacbo button p{font-family:var(--rr-display)!important;font-weight:800!important;"
+        "font-size:1.12rem!important;color:#fff!important;letter-spacing:.02em;}",
+        ".st-key-lb_roleta button{background:linear-gradient(180deg,#ff4d66,#c8102e)!important;box-shadow:0 6px 0 #6e0a1a,0 14px 22px rgba(0,0,0,.5)!important;}",
+        ".st-key-lb_bacbo button{background:linear-gradient(180deg,#5a8cff,#2f5fe0)!important;box-shadow:0 6px 0 #173a9a,0 14px 22px rgba(0,0,0,.5)!important;}",
+        ".st-key-lb_roleta button:active,.st-key-lb_bacbo button:active{transform:translateY(5px);box-shadow:0 1px 0 rgba(0,0,0,.6)!important;}",
+        "@media (max-width:900px){.lb-card{transform:none;}.lb-card:hover{transform:translateY(-3px);}.lb-cena{height:220px;}}",
+        "@media (prefers-reduced-motion:reduce){.lb-roda,.lb-orbita,.lb-dado{animation:none;}.lb-card{transition:none;}}",
+    ]
+    for nome, (valor, giro) in FACES_DADO.items():
+        pontos = ",".join(f"radial-gradient(circle at {x}% {y}%,#fff 0 7px,rgba(255,255,255,0) 8px)" for x, y in PONTOS_DADO[valor])
+        regras.append(f".lb-dado .{nome}{{transform:{giro};background-image:{pontos},"
+                      f"linear-gradient(145deg,rgba(255,255,255,.28),rgba(0,0,0,.28));}}")
+    return "".join(regras)
+
+
+def _tela_inicial(st, sessao: SessaoWeb, no_meu_pc: bool) -> str:
+    """Na primeira vez que a página abre: lobby, ou direto na mesa que já está sendo lida."""
+    if "rr_tela" not in st.session_state:
+        ativo = None
+        if sessao.leitor_ativo():
+            ativo = JOGO_ROLETA
+        elif getattr(sessao, "bacbo", None) is not None and sessao.bacbo.leitor_ativo():
+            ativo = JOGO_BACBO
+        elif no_meu_pc:
+            cfg = ler_config_painel()
+            if cfg.get("iniciar_sozinho") and cfg.get("url"):
+                ativo = JOGO_ROLETA  # "Começar a ler quando o painel abrir": vai direto para a roleta
+        if ativo:
+            st.session_state["rr_jogo_escolhido"] = ativo
+        st.session_state["rr_tela"] = "painel" if ativo else "lobby"
+    return st.session_state["rr_tela"]
+
+
+def _entrar_no_jogo(jogo: str) -> None:
+    import streamlit as st
+    st.session_state["rr_jogo_escolhido"] = jogo
+    st.session_state["rr_tela"] = "painel"
+
+
+def _ir_para_lobby() -> None:
+    import streamlit as st
+    st.session_state["rr_tela"] = "lobby"
+
+
+class HtmlLobby:
+    @staticmethod
+    def topo() -> str:
+        return ('<div class="lb-topo"><div class="rr-sub">Robô de sinais · leitura ao vivo</div>'
+                '<div class="lb-titulo" role="heading" aria-level="1">Escolha a mesa</div>'
+                '<div class="lb-sub">O robô acompanha a mesa pelo seu Chrome, avisa os gatilhos e confere cada entrada sozinho.</div></div>')
+
+    @staticmethod
+    def _pills(itens: List[Tuple[str, bool]]) -> str:
+        return '<div class="lb-linha">' + "".join(
+            f'<span class="lb-pill{" on" if ligado else ""}"><i></i>{html.escape(texto)}</span>' for texto, ligado in itens) + "</div>"
+
+    @classmethod
+    def roleta(cls, pills: List[Tuple[str, bool]]) -> str:
+        return ('<div class="lb-card lb-roleta"><div class="lb-cena" aria-hidden="true"><div class="lb-mesa">'
+                '<div class="lb-roda"><b class="lb-torre"></b></div><div class="lb-orbita"><i></i></div></div></div>'
+                '<div class="lb-info"><div class="lb-nome">Immersive Roulette</div>'
+                '<div class="lb-desc">Roleta europeia · padrões de cor, dúzia e coluna</div>'
+                + cls._pills(pills) + "</div></div>")
+
+    @classmethod
+    def bacbo(cls, pills: List[Tuple[str, bool]]) -> str:
+        faces = "".join(f'<span class="{nome}"></span>' for nome in FACES_DADO)
+        return ('<div class="lb-card lb-bacbo"><div class="lb-cena" aria-hidden="true"><div class="lb-dados">'
+                f'<div class="lb-dado p">{faces}</div><div class="lb-dado b">{faces}</div></div></div>'
+                '<div class="lb-info"><div class="lb-nome">Bac Bo</div>'
+                '<div class="lb-desc">Player x Banker nos dados · seis padrões prontos e os seus</div>'
+                + cls._pills(pills) + "</div></div>")
+
+
+def tela_lobby(st, sessao: SessaoWeb, no_meu_pc: bool) -> None:
+    st.markdown(HtmlLobby.topo(), unsafe_allow_html=True)
+    motor = sessao.motor
+    pills_roleta = [("Lendo ao vivo" if sessao.leitor_ativo() else ("Simulando" if sessao.sim["rodando"] else "Parada"),
+                     sessao.leitor_ativo() or sessao.sim["rodando"]),
+                    (f"Banca {formatar_reais(motor.banca.saldo)}", False),
+                    (f"{motor.banca.total().sinais} entradas na sessão", False)]
+    bb = getattr(sessao, "bacbo", None)
+    if bb is not None:
+        lendo = bb.leitor_ativo()
+        pills_bacbo = [("Lendo ao vivo" if lendo else ("Simulando" if bb.sim["rodando"] else "Parada"), lendo or bb.sim["rodando"]),
+                       (f"Banca {formatar_reais(bb.motor.banca.saldo)}", False),
+                       (f"{bb.motor.banca.total().sinais} entradas na sessão", False)]
+    else:
+        banca = _banca_salva("bacbo") if no_meu_pc else ConfigBacBo().banca_inicial
+        pills_bacbo = [("Parada", False), (f"Banca {formatar_reais(banca)}", False), ("0 entradas na sessão", False)]
+    esquerda, direita = st.columns(2, gap="large")
+    with esquerda:
+        st.markdown(HtmlLobby.roleta(pills_roleta), unsafe_allow_html=True)
+        st.button("Entrar na Roleta", key="lb_roleta", type="primary", on_click=_entrar_no_jogo, args=(JOGO_ROLETA,))
+    with direita:
+        st.markdown(HtmlLobby.bacbo(pills_bacbo), unsafe_allow_html=True)
+        st.button("Entrar no Bac Bo", key="lb_bacbo", type="primary", on_click=_entrar_no_jogo, args=(JOGO_BACBO,))
+    rodape = ("A mesa que estiver sendo lida continua lendo enquanto você está aqui no lobby." if no_meu_pc else
+              "O robô só observa. Nenhuma aposta é feita: todos os valores são de uma banca fictícia.")
+    st.markdown(f'<div class="lb-rodape">{rodape}</div>', unsafe_allow_html=True)
+
+
+# -----------------------------------------------------------------------------------
+# Som
+# -----------------------------------------------------------------------------------
+JS_SOM = r"""<!doctype html><html><head><meta charset="utf-8"></head><body><script>
+(function () {
+  const eventos = __EVENTOS__;
+  // O som é feito na página do painel (a "mãe" deste quadro invisível): ela já recebeu os seus
+  // cliques, então o navegador deixa tocar, e o mesmo áudio é reaproveitado entre um sinal e outro.
+  let alvo = window;
+  try { if (window.parent !== window && window.parent.document) alvo = window.parent; } catch (e) {}
+  let tocados = [];
+  try { tocados = JSON.parse(alvo.localStorage.getItem('rr_sons') || '[]'); } catch (e) {}
+  const novos = eventos.filter(e => !tocados.includes(e.id));
+  if (!novos.length) return;
+  try { alvo.localStorage.setItem('rr_sons', JSON.stringify(tocados.concat(novos.map(e => e.id)).slice(-80))); } catch (e) {}
+  const Ctx = alvo.AudioContext || alvo.webkitAudioContext;
+  if (!Ctx) return;
+  let ctx = alvo.__rrAudio;
+  if (!ctx || ctx.state === 'closed') { ctx = new Ctx(); alvo.__rrAudio = ctx; }
+  const saida = ctx.createGain();
+  saida.gain.value = 0.32;
+  saida.connect(ctx.destination);
+  function nota(freq, ini, dur, tipo, vol) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = tipo; o.frequency.setValueAtTime(freq, ini);
+    g.gain.setValueAtTime(0.0001, ini);
+    g.gain.exponentialRampToValueAtTime(vol, ini + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, ini + dur);
+    o.connect(g); g.connect(saida); o.start(ini); o.stop(ini + dur + 0.05);
+  }
+  const SONS = {
+    sinal: t => { nota(1046.5, t, 0.5, 'sine', 0.9); nota(2093, t, 0.3, 'sine', 0.22);
+                  nota(1568, t + 0.16, 0.75, 'sine', 0.9); nota(3136, t + 0.16, 0.4, 'sine', 0.18); return 0.95; },
+    green: t => { [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => nota(f, t + i * 0.09, 0.45, 'triangle', 0.7)); return 0.85; },
+    loss:  t => { nota(311.13, t, 0.35, 'triangle', 0.7); nota(233.08, t + 0.2, 0.6, 'triangle', 0.7); return 0.85; },
+    empate: t => { nota(783.99, t, 0.28, 'sine', 0.6); nota(987.77, t + 0.14, 0.4, 'sine', 0.6); return 0.6; },
+  };
+  const tocar = () => { let t = ctx.currentTime + 0.05; for (const e of novos) t += (SONS[e.tipo] || SONS.sinal)(t); };
+  if (ctx.state === 'running') tocar(); else ctx.resume().then(tocar).catch(() => {});
+})();
+</script></body></html>"""
+
+
+def _testar_som() -> None:
+    import streamlit as st
+    st.session_state["rr_som_teste"] = time.time()
+
+
+def _som_lateral(st) -> dict:
+    """Opções de som na barra lateral."""
+    st.markdown('<div class="rr-sub" style="margin-top:14px">Som</div>', unsafe_allow_html=True)
+    sinais = st.checkbox("Tocar quando sair um sinal", value=True, key="rr_som_sinais")
+    resultados = st.checkbox("Tocar no GREEN e no LOSS", value=False, key="rr_som_resultados")
+    st.button("Testar som", key="rr_som_testar", on_click=_testar_som)
+    return {"sinais": bool(sinais), "resultados": bool(resultados)}
+
+
+def _id_tempo(horario: datetime) -> str:
+    return f"{horario.timestamp():.3f}"
+
+
+def _eventos_som_roleta(motor: MotorWeb, som: Optional[dict]) -> List[dict]:
+    som = som or {}
+    eventos = []
+    if som.get("resultados") and motor.resultados:
+        r = motor.resultados[-1]
+        tipo = "green" if r.status.startswith("GREEN") else ("loss" if r.status == "LOSS" else "empate")
+        eventos.append({"id": f"rr-r-{_id_tempo(r.giro.horario)}-{r.sinal.tipo}", "tipo": tipo})
+    if som.get("sinais") and motor.pendentes and motor.historico:
+        tipos = "-".join(s.tipo for s in motor.pendentes)
+        eventos.append({"id": f"rr-s-{_id_tempo(motor.historico[-1].horario)}-{tipos}", "tipo": "sinal"})
+    return eventos
+
+
+def _eventos_som_bacbo(motor: MotorBacBo, som: Optional[dict]) -> List[dict]:
+    som = som or {}
+    eventos = []
+    if som.get("resultados") and motor.resultados:
+        r = motor.resultados[-1]
+        eventos.append({"id": f"bb-r-{_id_tempo(r.rodada.horario)}", "tipo": {"GREEN": "green", "LOSS": "loss"}.get(r.status, "empate")})
+    if som.get("sinais") and motor.pendentes and motor.historico:
+        eventos.append({"id": f"bb-s-{_id_tempo(motor.historico[-1].horario)}-{motor.pendentes[0].alvo}", "tipo": "sinal"})
+    return eventos
+
+
+def _tocar_sons(st, eventos: List[dict]) -> None:
+    """Fica no fim do painel ao vivo. Só aparece quando há algo para tocar."""
+    teste = st.session_state.get("rr_som_teste")
+    if teste and time.time() - teste < 8:
+        eventos = list(eventos) + [{"id": f"teste-{teste:.3f}", "tipo": "sinal"}]
+    if not eventos:
+        return
+    import streamlit.components.v1 as componentes
+    pagina = JS_SOM.replace("__EVENTOS__", json.dumps(eventos)).replace("<head>", "<head><title>rr-som</title>")
+    componentes.html(pagina, height=0)
 
 
 def rodando_no_streamlit() -> bool:

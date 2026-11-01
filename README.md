@@ -64,6 +64,8 @@ Na banca, o robô dá **uma entrada por rodada**: padrões que apontam o mesmo a
 ## Funcionalidades
 
 - **Painel visual (Streamlit):** últimas pedras com as cores da mesa, alerta de entrada, desempenho por padrão e gráfico da banca contra a curva esperada.
+- **Lobby 3D:** a primeira tela é a escolha da mesa, com uma roleta girando e dois dados rolando, feitos só com CSS 3D (sem bibliotecas).
+- **Som dos sinais:** toca um aviso quando sai um gatilho (e, se quiser, no GREEN e no LOSS), gerado com a Web Audio API do navegador, sem arquivos de áudio e sem repetir o mesmo sinal.
 - **Dois jogos no mesmo painel:** roleta europeia e Bac Bo, com sessões separadas (trocar de jogo não apaga nada).
 - **4 modos:** leitura automática da mesa ao vivo (Playwright, só no computador), entrada manual com tabuleiro clicável, simulador ao vivo e backtest em massa.
 - **Leitura ao vivo do Bac Bo:** lê o quadro de bolinhas da mesa pelo `data-type="roadItemColor"` do SVG, ordena pela posição na tela (coluna por coluna) e entende quando o quadro enche e a coluna mais antiga sai.
