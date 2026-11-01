@@ -2939,7 +2939,7 @@ def _controles_auto(st, sessao, tem_playwright: bool, bacbo: bool = False) -> No
                       index=0 if cfg[c_ + "escondido"] else 1, key=f"{k}_janela")
     c3, c4, c5 = st.columns([2, 2, 1])
     auto = c3.checkbox("Confirmar a faixa sozinho", value=cfg[c_ + "auto_confirmar"], key=f"{k}_auto")
-    sozinho = False if bacbo else c4.checkbox("Começar a ler quando o painel abrir",
+    sozinho = False if bacbo else c4.checkbox("Começar a ler sozinho ao entrar na roleta",
                                               value=cfg["iniciar_sozinho"], key="rr_sozinho")
     if c5.button("Iniciar leitura", key=f"{k}_ini_leitor", type="primary"):
         escondido = janela.startswith("Escondido")
@@ -4568,20 +4568,9 @@ def _css_lobby_e_som() -> str:
 
 
 def _tela_inicial(st, sessao: SessaoWeb, no_meu_pc: bool) -> str:
-    """Na primeira vez que a página abre: lobby, ou direto na mesa que já está sendo lida."""
+    """Toda vez que o painel abre (ou a página recarrega), começa no lobby: você escolhe a mesa."""
     if "rr_tela" not in st.session_state:
-        ativo = None
-        if sessao.leitor_ativo():
-            ativo = JOGO_ROLETA
-        elif getattr(sessao, "bacbo", None) is not None and sessao.bacbo.leitor_ativo():
-            ativo = JOGO_BACBO
-        elif no_meu_pc:
-            cfg = ler_config_painel()
-            if cfg.get("iniciar_sozinho") and cfg.get("url"):
-                ativo = JOGO_ROLETA  # "Começar a ler quando o painel abrir": vai direto para a roleta
-        if ativo:
-            st.session_state["rr_jogo_escolhido"] = ativo
-        st.session_state["rr_tela"] = "painel" if ativo else "lobby"
+        st.session_state["rr_tela"] = "lobby"
     return st.session_state["rr_tela"]
 
 
