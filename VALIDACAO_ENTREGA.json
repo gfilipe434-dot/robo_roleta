@@ -1,0 +1,59 @@
+{
+  "versao": "2.0.0-pesquisa",
+  "data": "2026-11-02",
+  "codigo_sha256": "24b4f11fd7f4035abb5c7c9740a76d1622dd4e7016fa498fab2b4708183d251a",
+  "testes_funcionais": "............................................................             [100%]\n60 passed in 8.85s",
+  "aceitacao_original": {
+    "roleta": {
+      "rodadas": 1000000,
+      "semente": 42,
+      "entradas": 195368,
+      "apostado": 3527208.0,
+      "lucro": -90804.0,
+      "passou": true,
+      "segundos": 6.955
+    },
+    "bacbo": {
+      "rodadas": 1000000,
+      "semente": 42,
+      "entradas": 515257,
+      "apostado": 5554907.0,
+      "lucro": -105951.0,
+      "passou": true,
+      "segundos": 9.074
+    }
+  },
+  "controle_novo_motor": {
+    "roleta": {
+      "rodadas": 200000,
+      "padroes": 19,
+      "selecionado": "coluna_cob3",
+      "acerto_teste": 0.65534262485482,
+      "roi_teste": -0.016986062717770034,
+      "meta_comprovada": false,
+      "segundos": 18.607
+    },
+    "bacbo": {
+      "rodadas": 200000,
+      "padroes": 15,
+      "selecionado": "bb_seg2",
+      "acerto_teste": 0.4389177370866357,
+      "roi_teste": -0.021809237496583766,
+      "meta_comprovada": false,
+      "segundos": 5.806
+    }
+  },
+  "limites": [
+    "Controle simulado; nenhum histórico real foi fornecido.",
+    "Leitura da conta/mesa de cassino não foi testada.",
+    "Arquivos BAT não foram executados em Windows neste ambiente.",
+    "Sem garantia de acerto ou retorno futuro."
+  ],
+  "versao_visual": "2.1",
+  "aceitacao_original_ultima_execucao": {
+    "data": "2026-11-02",
+    "codigo_sha256": "4513f9ef5a21345d30f4dbb7d3e48d0af47ff4c4a124d2362a59866519ca2594",
+    "nota": "Backtests da versão anterior. Núcleo desta atualização comparado por AST e preservado; não houve nova execução desnecessária desses backtests."
+  },
+  "verificacao_visual": "VALIDACAO_VISUAL.json"
+}

@@ -61,6 +61,14 @@ Cada padrão como se entrasse sozinho:
 
 Na banca, o robô dá **uma entrada por rodada**: padrões que apontam o mesmo alvo viram uma entrada só e, quando discordam (ex.: P P B B dispara "2 iguais" → Banker e "Duplas" → Player), vale o padrão mais longo. Foram **515.257 entradas** e a banca terminou em **−R$ 105.951** (−1,91% do apostado), com entradas de R$ 10 e R$ 1 de proteção no empate. A vantagem da casa no Bac Bo é 1,13% em Player/Banker e 4,48% no empate; a matemática previa −R$ 113.866, e o resultado ficou dentro da variação normal.
 
+## Versão 2.0: pesquisa e validação
+
+A área **Pesquisa e validação** testa 19 hipóteses de roleta e 15 de Bac Bo (além dos padrões originais) com rigor estatístico: os dados são divididos em ordem cronológica em treino (50%), validação (25%) e teste final (25%), o candidato é escolhido só no treino e congelado, e cada período mostra acerto, intervalo de Wilson com correção de Bonferroni, limite conservador de retorno (Hoeffding), queda máxima e sequência de perdas. Aceita o histórico completo da mesa em CSV, as rodadas da sessão atual ou uma simulação de controle.
+
+Nos controles simulados de 200.000 rodadas, nenhum candidato atingiu a meta: o melhor da roleta acertou 65,5% (precisava de 66,7% só para empatar) e o do Bac Bo, 43,9%, ambos com retorno negativo no teste final. Detalhes em `LEIA-ME.md` e `FONTES_E_METODOLOGIA.md`.
+
+O visual também mudou: lobby com roleta numerada em SVG e quatro dados 3D sob cúpulas, tema verde, marfim e dourado, tudo gerado no próprio arquivo, sem imagens nem fontes externas.
+
 ## Funcionalidades
 
 - **Painel visual (Streamlit):** últimas pedras com as cores da mesa, alerta de entrada, desempenho por padrão e gráfico da banca contra a curva esperada.
@@ -95,7 +103,7 @@ Bac Bo: RodadaBacBo ──► MotorBacBo ──► BancaBacBo (pagamentos reais 
 
 ```bash
 pip install streamlit              # painel visual
-pip install playwright             # só para a leitura automática da mesa
+pip install playwright             # só para a leitura automática da mesa (ou: pip install -r requirements-pc.txt)
 
 python robo_roleta.py              # menu com todos os modos (terminal)
 python robo_roleta.py --web        # painel visual no navegador, rodando escondido

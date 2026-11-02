@@ -1,0 +1,4 @@
+id_rodada;mesa;horario;origem;resultado;soma
+1;exemplo;2026-11-02T15:00:00-03:00;exemplo;P;9
+2;exemplo;2026-11-02T15:00:40-03:00;exemplo;B;8
+3;exemplo;2026-11-02T15:01:20-03:00;exemplo;E;7

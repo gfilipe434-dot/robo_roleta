@@ -6,6 +6,9 @@
 ===================================================================================
 
 O QUE ESTE SCRIPT FAZ
+  ATUALIZAÇÃO 2.0: a área Pesquisa e validação testa 19 hipóteses de roleta e
+  15 de Bac Bo em períodos separados, sem garantia de acerto ou lucro futuro.
+  Os padrões originais continuam abaixo para compatibilidade dos backtests.
   1. Coleta um número novo da roleta (por padrão, de um SIMULADOR fiel à roleta
      europeia: 37 casas, 0 verde, 18 vermelhos e 18 pretos).
   2. Guarda os últimos 20 giros num histórico (collections.deque com maxlen=20).
@@ -64,6 +67,10 @@ import argparse
 import copy
 import csv
 import html
+import hashlib
+from functools import lru_cache
+from itertools import product
+from statistics import NormalDist
 import importlib.util
 import io
 import json
@@ -81,8 +88,8 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
 from typing import Deque, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -118,6 +125,11 @@ class Config:
 
     def __post_init__(self) -> None:
         """Valida a configuração logo na criação, para o erro aparecer cedo e claro."""
+        if any(not math.isfinite(v) for v in (self.intervalo_min, self.intervalo_max,
+                self.banca_inicial, self.valor_por_alvo, self.valor_protecao_zero)):
+            raise ValueError("os valores da configuração precisam ser finitos.")
+        if self.banca_inicial <= 0:
+            raise ValueError("a banca inicial precisa ser positiva.")
         if self.intervalo_min < 0 or self.intervalo_max < self.intervalo_min:
             raise ValueError("intervalos inválidos: use 0 <= intervalo_min <= intervalo_max.")
         gatilhos = (self.gatilho_cor, self.gatilho_duzia, self.gatilho_coluna)
@@ -1595,6 +1607,13 @@ def ler_argumentos(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--escondido", action="store_true",
                         help="no modo --navegador, abre o Chrome do robô sem janela visível")
     parser.add_argument("--auto-confirmar", action="store_true", help=argparse.SUPPRESS)  # usado pelo painel
+    parser.add_argument("--pesquisa", metavar="CSV", help="valida padrões no histórico completo da mesa")
+    parser.add_argument("--pesquisa-simulada", type=int, metavar="N", help="pesquisa com N rodadas de controle simulado")
+    parser.add_argument("--relatorio-pesquisa", metavar="JSON", help="destino do relatório detalhado de pesquisa")
+    parser.add_argument("--ficha-pesquisa", type=float, default=10.0, help="ficha fixa por alvo na pesquisa")
+    parser.add_argument("--protecao-pesquisa", type=float, default=0.0, help="valor de proteção na pesquisa")
+    parser.add_argument("--banca-pesquisa", type=float, default=1000.0, help="banca do acompanhamento de pesquisa")
+    parser.add_argument("--min-sinais-pesquisa", type=int, default=200, help="mínimo de sinais por período reservado")
     return parser.parse_args(argv)
 
 
@@ -1656,6 +1675,13 @@ def pausar_antes_de_fechar() -> None:
 
 def rodar(args: argparse.Namespace) -> None:
     """Monta as peças conforme o modo escolhido e liga o motor."""
+    if args.pesquisa or args.pesquisa_simulada is not None:
+        try:
+            rodar_pesquisa_terminal(args)
+        except (ValueError, OSError) as erro:
+            exibir(f"Configuração/dados inválidos: {erro}")
+            sys.exit(1)
+        return
     if args.jogo == "bacbo":
         rodar_bacbo_terminal(args)
         return
@@ -2012,19 +2038,24 @@ class MotorWeb:
         self.curva: List[Tuple[int, float, float]] = [(0, 0.0, 0.0)]
         self.iniciada_em = datetime.now()
         self._foto: Optional[tuple] = None
+        iniciar_registro_pesquisa(self, "roleta")
 
     def carregar_historico(self, numeros: List[int]) -> None:
         """Números que a mesa já mostrava (do mais antigo para o mais novo), sem apostar."""
         for numero in numeros:
             self.historico.append(Giro.a_partir_do_numero(numero))
         self.pendentes = self.estrategia.analisar(self.historico, self.total_giros)
+        sincronizar_historico_pesquisa(self)
 
     def processar(self, numero: int, permitir_desfazer: bool = False) -> Tuple[Giro, List[ResultadoAposta]]:
         """Um giro completo, na mesma ordem do terminal. Devolve o giro e os resultados."""
         giro = Giro.a_partir_do_numero(numero)  # valida ANTES de mexer em qualquer coisa
         if permitir_desfazer:
+            salvar_foto_pesquisa(self)
             self._foto = (copy.deepcopy(self.banca), self.historico.copy(), list(self.pendentes),
                           self.total_giros, list(self.resultados), list(self.curva))
+        if not permitir_desfazer:
+            self._foto = None
         self.total_giros += 1
         self.historico.append(giro)
 
@@ -2042,6 +2073,7 @@ class MotorWeb:
             self.curva.append((self.total_giros, total.lucro, -total.apostado * VANTAGEM_DA_CASA))
             if len(self.curva) > self.LIMITE_CURVA:  # afina a curva mantendo o começo e o fim
                 self.curva = self.curva[:1] + self.curva[1:-1:2] + self.curva[-1:]
+        registrar_rodada_pesquisa(self, giro, self.total_giros)
         return giro, resultados
 
     def desfazer(self) -> bool:
@@ -2052,6 +2084,7 @@ class MotorWeb:
         self.banca, self.historico, self.pendentes, self.total_giros = banca, historico, pendentes, total
         self.resultados = deque(resultados, maxlen=self.LIMITE_FEED)
         self.curva = curva
+        desfazer_registro_pesquisa(self)
         self._foto = None
         return True
 
@@ -2397,16 +2430,15 @@ class SessaoWeb:
 class Html:
     """Pedaços visuais do painel. Tudo em uma linha, para o Markdown do Streamlit não mexer."""
 
-    CORES = {"bg": "#0b0d12", "surface": "#131720", "surface2": "#1a1f2b", "line": "#262c3a",
-             "ink": "#eef0f4", "ink2": "#aab1be", "muted": "#7d8594", "red": "#ff2d4b",
-             "black": "#16181e", "green": "#14d27a", "blue": "#3d8bff", "gold": "#e8b84a",
-             "good": "#2fd17a", "bad": "#ff4d5e", "player": "#2f6fff"}
+    CORES = {"bg": "#080e0c", "surface": "#111b17", "surface2": "#19261f", "line": "#2a3930",
+             "ink": "#f0ede4", "ink2": "#adb7ad", "muted": "#91a193", "red": "#a63a45",
+             "black": "#141918", "green": "#5fa67a", "blue": "#7da4d4", "gold": "#cfb37c",
+             "good": "#7cceaa", "bad": "#e58b8b", "player": "#658bb6"}
 
     @classmethod
     def css(cls) -> str:
         c = cls.CORES
         regras = [
-            "@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=JetBrains+Mono:wght@400;600;700&display=swap');",
             f":root{{--rr-bg:{c['bg']};--rr-surface:{c['surface']};--rr-surface2:{c['surface2']};--rr-line:{c['line']};"
             f"--rr-ink:{c['ink']};--rr-ink2:{c['ink2']};--rr-muted:{c['muted']};--rr-red:{c['red']};--rr-black:{c['black']};"
             f"--rr-green:{c['green']};--rr-blue:{c['blue']};--rr-gold:{c['gold']};--rr-good:{c['good']};--rr-bad:{c['bad']};"
@@ -2417,7 +2449,7 @@ class Html:
             "radial-gradient(900px 380px at 50% 105%,rgba(61,139,255,.10),transparent 70%) fixed,var(--rr-bg)!important;color:var(--rr-ink);}",
             "[data-testid='stHeader']{background:transparent!important;}",
             "[data-testid='stSidebar']{background:#0f1218!important;border-right:1px solid var(--rr-line);}",
-            "[data-testid='stSidebar'] *,.stApp label,.stApp p,.stApp span,.stApp li{color:var(--rr-ink);}",
+            ".stApp label,.stApp [data-testid='stMarkdownContainer']>p{color:var(--rr-ink);}",
             ".stApp [data-testid='stCaptionContainer'] *,.stApp small{color:var(--rr-muted)!important;}",
             ".block-container{padding-top:1.6rem;max-width:1320px;}",
             ".stApp input,.stApp textarea{background:var(--rr-surface2)!important;color:var(--rr-ink)!important;}",
@@ -2529,7 +2561,8 @@ class Html:
                           f"color:#fff!important;border:0!important;min-height:44px;font-family:var(--rr-mono);font-weight:700;"
                           f"box-shadow:0 4px 0 {borda},0 8px 12px rgba(0,0,0,.45)!important;transition:transform .08s ease;}}"
                           f".st-key-rr_num_{n} button:active{{transform:translateY(3px);box-shadow:0 1px 0 {borda}!important;}}")
-        regras.append(_css_lobby_e_som())  # lobby 3D e o componente de som (seção 13)
+        regras.append(_css_visual_realista())
+        regras.append(_css_lobby_e_som())  # materiais e elementos 3D do lobby
         return "<style>" + "".join(regras) + "</style>"
 
     @staticmethod
@@ -2698,8 +2731,8 @@ def app_web() -> None:
     """A tela do painel. O Streamlit executa esta função de novo a cada interação."""
     import streamlit as st
 
-    st.set_page_config(page_title="Robô de Roleta", page_icon="🎯", layout="wide",
-                       initial_sidebar_state="expanded")
+    st.set_page_config(page_title="Roleta e Bac Bo · Análise", page_icon="🎯", layout="wide",
+                       initial_sidebar_state="auto")
     st.markdown(Html.css(), unsafe_allow_html=True)
     if not hasattr(st, "fragment"):
         st.error("Este painel precisa do Streamlit 1.37 ou mais novo. Rode:  py -m pip install -U streamlit")
@@ -2732,7 +2765,7 @@ def app_web() -> None:
     # --------------------------- barra lateral -------------------------------------
     with st.sidebar:
         if no_lobby:
-            st.markdown('<div class="rr-marca lb"><i></i>Robô de Sinais</div>'
+            st.markdown('<div class="rr-marca lb"><i></i>Mesa de análise</div>'
                         '<div class="rr-sub">Roleta · Bac Bo</div>', unsafe_allow_html=True)
         else:
             sub = ("Bac Bo (Evolution)" if e_bacbo else "Roleta europeia") + ("" if no_meu_pc else " · banca fictícia")
@@ -2779,6 +2812,7 @@ def app_web() -> None:
                         sessao.nova_sessao(config_tela)
             st.markdown('<div class="rr-nota">O robô só observa. Nenhuma aposta é feita: '
                         'todos os valores são de uma banca fictícia.</div>', unsafe_allow_html=True)
+        visao = "Monitor" if no_lobby else st.radio("Área", ["Monitor", "Pesquisa e validação"], key="rr_area")
         som = {} if no_lobby else _som_lateral(st)
         # Só no seu PC: hospedado, um visitante não pode desligar o site nem trocar o código
         atualizar = no_meu_pc and st.button("Atualizar robô", key="rr_atualizar")
@@ -2822,6 +2856,12 @@ def app_web() -> None:
     # Trocar de jogo conta como trocar de modo: pausa a leitura e o simulador (as sessões ficam guardadas)
     sessao.trocar_modo(f"{jogo} · {modo}")
 
+    alvo_sessao = bacbo if bacbo is not None else sessao
+    alvo_sessao.motor.fonte_pesquisa = ("simulado" if modo == MODO_SIM else
+                                      ("manual" if modo == MODO_MANUAL else "navegador"))
+    if visao == "Pesquisa e validação":
+        _painel_pesquisa(st, alvo_sessao, "bacbo" if bacbo is not None else "roleta")
+        return
     if bacbo is not None:
         app_bacbo(st, bacbo, modo, no_meu_pc, config_tela, som)
         return
@@ -2893,6 +2933,7 @@ def app_web() -> None:
         motor = sessao.motor
         st.markdown(Html.cartoes(motor), unsafe_allow_html=True)
         st.markdown(Html.faixa_pedras(motor.historico), unsafe_allow_html=True)
+        _resumo_monitor_pesquisa(st, motor, "roleta")
         if motor.pendentes:
             st.markdown("".join(Html.alerta(s, motor) for s in motor.pendentes), unsafe_allow_html=True)
         else:
@@ -3045,11 +3086,11 @@ def _tela_manual(st, sessao: SessaoWeb) -> None:
     # Layout igual ao da mesa deitada: zero à esquerda, linhas de cima (3, 6, ... 36), do meio e de baixo
     for linha_mesa in (3, 2, 1):
         colunas = st.columns(13)
-        if linha_mesa == 2 and colunas[0].button("0", key="rr_num_0"):
+        if linha_mesa == 2 and colunas[0].button("0", key="rr_num_0", use_container_width=True):
             clicado = 0
         for j in range(12):
             n = 3 * j + linha_mesa
-            if colunas[j + 1].button(str(n), key=f"rr_num_{n}"):
+            if colunas[j + 1].button(str(n), key=f"rr_num_{n}", use_container_width=True):
                 clicado = n
     c1, _ = st.columns([1, 5])
     if c1.button("Desfazer último", key="rr_desfazer"):
@@ -3148,6 +3189,10 @@ class ConfigBacBo:
     tamanho_historico: int = 30
 
     def __post_init__(self) -> None:
+        if any(not math.isfinite(v) for v in (self.valor_por_alvo, self.valor_protecao_empate, self.banca_inicial)):
+            raise ValueError("os valores da banca precisam ser finitos.")
+        if isinstance(self.tamanho_historico, bool) or not isinstance(self.tamanho_historico, int) or self.tamanho_historico < 1:
+            raise ValueError("tamanho_historico precisa ser um inteiro positivo.")
         if self.valor_por_alvo <= 0 or self.valor_protecao_empate < 0 or self.banca_inicial <= 0:
             raise ValueError("os valores da banca do Bac Bo precisam ser positivos.")
 
@@ -3163,7 +3208,7 @@ class RodadaBacBo:
 
     @classmethod
     def dos_dados(cls, p1: int, p2: int, b1: int, b2: int, horario: Optional[datetime] = None) -> "RodadaBacBo":
-        if any(not 1 <= d <= 6 for d in (p1, p2, b1, b2)):
+        if any(isinstance(d, bool) or not isinstance(d, int) or not 1 <= d <= 6 for d in (p1, p2, b1, b2)):
             raise ValueError("dado inválido (tem que ser de 1 a 6)")
         sp, sb = p1 + p2, b1 + b2
         resultado = PLAYER if sp > sb else (BANKER if sb > sp else EMPATE)
@@ -3175,8 +3220,10 @@ class RodadaBacBo:
         """Quando só se sabe quem ganhou (modo manual): 'soma' é a soma vencedora, ou a do empate."""
         if resultado not in (PLAYER, BANKER, EMPATE):
             raise ValueError(f"resultado inválido: {resultado!r}")
-        if soma is not None and not 2 <= soma <= 12:
+        if soma is not None and (isinstance(soma, bool) or not isinstance(soma, int) or not 2 <= soma <= 12):
             raise ValueError("a soma de dois dados vai de 2 a 12")
+        if soma == 2 and resultado != EMPATE:
+            raise ValueError("soma vencedora 2 só é possível em empate")
         sp = soma if resultado in (PLAYER, EMPATE) else None
         sb = soma if resultado in (BANKER, EMPATE) else None
         return cls(resultado, sp, sb, horario or datetime.now())
@@ -3390,6 +3437,7 @@ class BancaBacBo:
         self.apostado_lado = 0.0
         self.apostado_empate = 0.0
         self.entradas_tipo = {"lado": 0, "empate": 0}
+        self.liquidacoes_estimadas = 0
 
     def _calcular(self, alvo: str, rodada: RodadaBacBo) -> Tuple[str, float, float, float, float]:
         """(status, total apostado, lucro, apostado no lado, apostado no empate) de uma entrada."""
@@ -3423,6 +3471,9 @@ class BancaBacBo:
     def liquidar(self, sinal: SinalBacBo, rodada: RodadaBacBo) -> ResultadoBacBo:
         """A entrada da rodada (a única que mexe na banca)."""
         status, apostado, lucro, no_lado, no_empate = self._calcular(sinal.alvo, rodada)
+        if rodada.resultado == EMPATE and rodada.soma_vencedora is None and (sinal.alvo == EMPATE or
+                (self.config.protecao_empate and self.config.valor_protecao_empate > 0)):
+            self.liquidacoes_estimadas += 1
         self._somar(self.geral, status, apostado, lucro)
         self.apostado_lado += no_lado
         self.apostado_empate += no_empate
@@ -3480,6 +3531,7 @@ class MotorBacBo:
         self.resultados: Deque[ResultadoBacBo] = deque(maxlen=self.LIMITE_FEED)
         self.curva: List[Tuple[int, float, float]] = [(0, 0.0, 0.0)]
         self._foto: Optional[tuple] = None
+        iniciar_registro_pesquisa(self, "bacbo")
 
     def reanalisar(self) -> None:
         """Procura padrões no histórico atual e monta a entrada da próxima rodada."""
@@ -3488,8 +3540,11 @@ class MotorBacBo:
 
     def processar(self, rodada: RodadaBacBo, permitir_desfazer: bool = False) -> List[ResultadoBacBo]:
         if permitir_desfazer:
+            salvar_foto_pesquisa(self)
             self._foto = (copy.deepcopy(self.banca), self.historico.copy(), list(self.brutos), list(self.pendentes),
                           list(self.descartados), self.puladas, self.total_rodadas, list(self.resultados), list(self.curva))
+        if not permitir_desfazer:
+            self._foto = None
         self.total_rodadas += 1
         self.historico.append(rodada)
         if self.brutos and not self.pendentes:
@@ -3508,6 +3563,7 @@ class MotorBacBo:
             self.curva.append((self.total_rodadas, self.banca.geral.lucro, self.banca.esperado()))
             if len(self.curva) > self.LIMITE_CURVA:
                 self.curva = self.curva[:1] + self.curva[1:-1:2] + self.curva[-1:]
+        registrar_rodada_pesquisa(self, rodada, self.total_rodadas)
         return resultados
 
     def desfazer(self) -> bool:
@@ -3516,6 +3572,7 @@ class MotorBacBo:
         (self.banca, self.historico, self.brutos, self.pendentes, self.descartados, self.puladas,
          self.total_rodadas, resultados, self.curva) = self._foto
         self.resultados = deque(resultados, maxlen=self.LIMITE_FEED)
+        desfazer_registro_pesquisa(self)
         self._foto = None
         return True
 
@@ -4084,6 +4141,7 @@ def _carregar_historico_bacbo(motor: MotorBacBo, rodadas: List[RodadaBacBo]) -> 
     for rodada in rodadas:
         motor.historico.append(rodada)
     motor.reanalisar()
+    sincronizar_historico_pesquisa(motor)
 
 
 class HtmlBacBo:
@@ -4335,6 +4393,7 @@ def app_bacbo(st, bacbo: SessaoBacBo, modo: str, no_meu_pc: bool, config_tela: C
         motor = bacbo.motor
         st.markdown(HtmlBacBo.cartoes(motor), unsafe_allow_html=True)
         st.markdown(HtmlBacBo.faixa(motor.historico), unsafe_allow_html=True)
+        _resumo_monitor_pesquisa(st, motor, "bacbo")
         if motor.pendentes:
             st.markdown(HtmlBacBo.alertas(motor), unsafe_allow_html=True)
         else:
@@ -4482,89 +4541,293 @@ FACES_DADO = {"f1": (1, "translateZ(37px)"), "f2": (3, "rotateY(90deg) translate
               "f5": (2, "rotateX(90deg) translateZ(37px)"), "f6": (5, "rotateX(-90deg) translateZ(37px)")}
 
 
+def _css_visual_realista() -> str:
+    """Tema visual autocontido: sem fontes, imagens ou CDNs externas."""
+    return r"""
+:root{
+ --rr-bg:#080e0c;--rr-surface:#111b17;--rr-surface2:#19261f;--rr-line:#2a3930;
+ --rr-ink:#f0ede4;--rr-ink2:#adb7ad;--rr-muted:#91a193;--rr-red:#c75b65;
+ --rr-black:#141918;--rr-green:#6ac69b;--rr-blue:#7da4d4;--rr-gold:#cfb37c;
+ --rr-good:#7cceaa;--rr-bad:#e58b8b;
+ --rr-display:'Segoe UI',Arial,system-ui,sans-serif;
+ --rr-mono:'Cascadia Code','SFMono-Regular',Consolas,monospace;
+ --lb-brass:#cfb37c;--lb-brass-light:#f0dbac;--lb-cream:#f3eee2;
+}
+.stApp,[data-testid='stAppViewContainer']{
+ background:radial-gradient(ellipse at 54% 0%,rgba(117,109,69,.12),transparent 52%),
+ radial-gradient(ellipse at 100% 62%,rgba(38,79,56,.10),transparent 58%),#080e0c!important;
+ color:var(--rr-ink);font-family:var(--rr-display);
+}
+[data-testid='stHeader']{background:transparent!important;}
+.stApp [data-testid='stSidebar']{background:linear-gradient(180deg,#111c16,#0b130f 70%)!important;border-right:1px solid #28372a;}
+.stApp [data-testid='stSidebarContent']{padding-top:1rem;}
+.stApp .block-container{padding-top:2rem;padding-bottom:2.5rem;max-width:1320px;}
+.stApp [data-testid='stSidebar'] p,.stApp [data-testid='stSidebar'] label{font-size:.88rem;}
+.stApp p,.stApp label{line-height:1.6;}
+.stApp [data-testid='stCaptionContainer'] *,.stApp small{color:var(--rr-muted)!important;}
+.stApp [data-baseweb='input'],.stApp [data-baseweb='select']>div,.stApp [data-baseweb='base-input'],
+.stApp textarea,.stApp input{background:#142019!important;color:#eeeade!important;border-color:#354336!important;}
+.stApp [role='radiogroup'] label{padding-block:4px;}
+.stApp [data-testid='stMetric']{background:linear-gradient(145deg,#19251c,#101a14);border:1px solid #344132;border-radius:13px;padding:14px 16px;}
+.stApp [data-testid='stMetricValue']{font-family:var(--rr-display);font-weight:600;color:var(--rr-ink);}
+.stApp [data-testid='stMetricLabel']{color:var(--rr-muted);}
+.stApp .stButton>button,.stApp .stDownloadButton>button{
+ border:1px solid #394535;background:linear-gradient(180deg,#223025,#17221a);
+ color:#e4e4d8;border-radius:9px;font-family:var(--rr-display);font-weight:600;min-height:42px;
+ box-shadow:inset 0 1px 0 #ffffff08,0 3px 8px #00000028;transition:background .2s,border-color .2s,transform .2s;
+}
+.stApp .stButton>button:hover,.stApp .stDownloadButton>button:hover{border-color:#b49c64;color:#fff3d3;background:#273427;}
+.stApp .stButton>button[kind='primary']{
+ background:linear-gradient(145deg,#e1c995,#bca068)!important;border-color:#ddc28c!important;
+ color:#1b2119!important;box-shadow:inset 0 1px 0 #fff8,0 5px 18px #0005;
+}
+.stApp .stButton>button[kind='primary'] p{color:#1b2119!important;}
+.stApp button:focus-visible,.stApp input:focus-visible{outline:2px solid #e3c789!important;outline-offset:4px;}
+.stApp [data-testid='stExpander']{border:1px solid #2e3c30;background:#101b15;border-radius:13px;box-shadow:none;}
+.stApp [data-testid='stExpander'] details summary{padding-block:12px;background:#18251b;border-radius:12px;}
+.stApp [data-testid='stDataFrame']{border:1px solid #3c4938;border-radius:11px;overflow:hidden;}
+.stApp [data-testid='stFileUploader']{border-radius:12px;}
+.stApp [data-testid='stProgress'] div[role='progressbar']>div>div{background:var(--rr-gold)!important;}
+.rr-marca{font-size:1.15rem;font-weight:650;letter-spacing:-.025em;color:#efe8d6;gap:10px;}
+.rr-marca i,.rr-marca.lb i,.rr-marca.bb i{
+ width:23px;height:23px;border:2px solid #b29a65;box-shadow:inset 0 0 0 3px #111d15,0 0 0 1px #493e28;
+ background:conic-gradient(#9d3441 0 20%,#1c241d 20% 42%,#397651 42% 48%,#1c241d 48% 70%,#9d3441 70% 90%,#1c241d 90%);
+}
+.rr-sub{font-size:.66rem;letter-spacing:.14em;color:#a8b2a0;font-weight:500;line-height:1.6;}
+.rr-topo{margin-bottom:24px;gap:14px;}
+.rr-titulo{font-size:clamp(1.8rem,3vw,2.5rem);font-weight:600;letter-spacing:-.045em;line-height:1.15;text-shadow:none;color:#f3eee2;}
+.rr-status{padding:8px 12px;border-color:#354234;background:#142019;color:#c5d0bc;font-size:.7rem;}
+.rr-status.on i{background:#78c19d;box-shadow:0 0 0 4px #78c19d12;animation:none;}
+.rr-cartoes{gap:12px;margin:6px 0 24px;}
+.rr-cartao{position:relative;background:linear-gradient(135deg,#1a281e,#111c15);border:1px solid #354333;border-radius:13px;padding:20px 18px;gap:10px;box-shadow:inset 0 1px 0 #ffffff05,0 7px 18px #00000020;transition:border-color .2s;}
+.rr-cartao:hover{transform:none;border-color:#8b7d51;box-shadow:inset 0 1px 0 #ffffff05,0 7px 18px #00000020;}
+.rr-cartao:before{content:'';position:absolute;left:18px;top:0;width:28px;height:2px;background:#b99d62;opacity:.8;}
+.rr-cartao .r{font-size:.64rem;color:#9eaf98;letter-spacing:.09em;}
+.rr-cartao .v{font-size:clamp(1.15rem,1.7vw,1.6rem)!important;font-weight:550;letter-spacing:-.035em;line-height:1.2;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere;}
+.rr-cartao .d{font-size:.7rem;color:#a0b29f;line-height:1.5;}
+.rr-bloco{background:linear-gradient(145deg,#142019,#101a14);border:1px solid #2d3c2e;border-radius:13px;box-shadow:inset 0 1px 0 #ffffff04;margin-bottom:20px;padding:20px;}
+.rr-bloco .rr-h{font-weight:600;font-size:1rem;letter-spacing:-.01em;}
+.rr-bloco .rr-h small{font-size:.61rem;}
+.rr-calmo{background:#131e17;border:1px dashed #40503b;border-radius:13px;padding:20px;}
+.rr-calmo b{font-weight:600;}.rr-calmo span{font-size:.74rem;line-height:1.6;}
+.rr-alerta,.bb-alerta{background:linear-gradient(125deg,#2b2619,#182219 70%);border-color:#9c834f;box-shadow:0 5px 18px #0004;animation:none;border-radius:13px;}
+.rr-alerta .tag{color:#d8bd80;}.rr-alerta .pad{font-weight:650;}
+.rr-alvo{border-color:#5b5337;background:linear-gradient(145deg,#2e301f,#1d281c);border-radius:9px;font-weight:600;}
+.rr-valor{font-weight:600;}.rr-validade{line-height:1.5;}
+.rr-pedra,.bb-chip{border:1px solid #ffffff25;box-shadow:inset 0 1px 2px #ffffff16,0 3px 5px #0005!important;}
+.rr-pedra.v{background:radial-gradient(circle at 35% 25%,#b44b56,#791f2c 80%);}
+.rr-pedra.p{background:radial-gradient(circle at 35% 25%,#3f4941,#121a15 80%);}
+.rr-pedra.z{background:radial-gradient(circle at 35% 25%,#659671,#22573b 80%);color:#fff;}
+.rr-pedra.nova,.bb-chip.nova{animation:none;outline:1px solid #d0b77c;outline-offset:4px;}
+.bb-chip.p{background:radial-gradient(circle at 35% 25%,#658bb6,#2d4c77 85%);}
+.bb-chip.b{background:radial-gradient(circle at 35% 25%,#b1666b,#772f3a 85%);}
+.bb-chip.e{background:radial-gradient(circle at 35% 25%,#e2c78e,#9e834d 85%);color:#1a2118;}
+.rr-feed{gap:7px;}.rr-item{background:#1b291e;border:1px solid #2f3e2e;padding:10px 12px;}
+.rr-item .t{font-size:.82rem;color:#bcc8b7;}.rr-badge{font-size:.64rem;font-weight:500;}
+.rr-tabela th{font-size:.61rem;border-color:#33412e;color:#9bad92;}
+.rr-tabela td{font-size:.76rem;border-color:#273726;padding:11px 6px;}
+.rr-nota{color:#9aae92;font-size:.76rem;}.rr-graf text{fill:#99ac91;}
+.rr-graf svg{overflow:visible;}.rr-legenda{font-size:.67rem;}
+.rr-pos{color:#83cfaa!important;}.rr-neg{color:#e7a29a!important;}
+.stApp [data-testid='stHorizontalBlock']:has([class*='st-key-rr_num_']){gap:5px!important;}
+.stApp [data-testid='stHorizontalBlock']:has([class*='st-key-rr_num_']) button{border-radius:7px!important;box-shadow:inset 0 1px 0 #fff2,0 3px 5px #0004!important;min-width:0;padding:3px!important;}
+@media(max-width:1050px){.rr-cartoes{grid-template-columns:repeat(2,minmax(0,1fr));}.rr-cartao .v{font-size:1.6rem;}}
+@media(max-width:700px){
+ .stApp .block-container{padding:1rem 1rem 2rem;}.rr-titulo{font-size:1.85rem;}.rr-topo{margin-bottom:20px;}
+ .rr-cartoes{gap:9px;}.rr-cartao{padding:16px 12px;}.rr-cartao .v{font-size:1.4rem;white-space:normal;overflow-wrap:anywhere;}
+ .rr-cartao .r{font-size:.58rem;}.rr-cartao .d{font-size:.63rem;}.rr-bloco{padding:15px 12px;overflow-x:auto;}
+ .rr-alerta{padding:18px 15px;}.rr-alerta .grade{grid-template-columns:1fr;gap:14px;}
+ .rr-tabela{min-width:480px;}.rr-item{gap:8px;padding:9px 8px;}.rr-item .t{font-size:.74rem;}
+ .stApp [data-testid='stHorizontalBlock']:has([class*='st-key-rr_num_']){display:grid!important;grid-template-columns:repeat(6,minmax(0,1fr));gap:7px!important;}
+ .stApp [data-testid='stHorizontalBlock']:has([class*='st-key-rr_num_'])>[data-testid='stColumn']{width:auto!important;min-width:0!important;}
+ .stApp [data-testid='stHorizontalBlock']:has([class*='st-key-rr_num_'])>[data-testid='stColumn']:not(:has(button)){display:none;}
+}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;scroll-behavior:auto!important;transition:none!important;}}
+"""
+
 def _css_lobby_e_som() -> str:
-    passo = 360 / 37
-    cores = {"v": "#c8102e", "p": "#15171c", "z": "#0b8a4a"}
-    casas = ",".join(f"{cores[Html.tipo_cor(n)]} {i * passo:.3f}deg {(i + 1) * passo:.3f}deg"
-                     for i, n in enumerate(RODA_EUROPEIA))
-    regras = [
-        # o componente de som não ocupa espaço na tela
-        ".element-container:has(iframe[height='0']),[data-testid='stElementContainer']:has(iframe[height='0'])"
-        "{position:absolute!important;width:0!important;height:0!important;overflow:hidden!important;margin:0!important;}",
-        ".rr-marca.lb i{background:radial-gradient(circle at 33% 28%,rgba(255,255,255,.8) 0,rgba(255,255,255,0) 35%),"
-        "conic-gradient(var(--rr-red) 0 25%,#2f6fff 0 50%,var(--rr-gold) 0 75%,var(--rr-green) 0);}",
-        # topo do lobby
-        ".lb-topo{text-align:center;margin:6px 0 34px;}",
-        ".lb-titulo{font-family:var(--rr-display);font-weight:800;font-size:clamp(2.3rem,5.2vw,3.8rem);letter-spacing:-.035em;"
-        "line-height:1;color:var(--rr-ink);margin:8px 0 12px;text-shadow:0 1px 0 #c3c7d0,0 2px 0 #9aa0ab,0 3px 0 #737985,"
-        "0 4px 0 #555b66,0 5px 0 #3c414b,0 6px 0 #2b2f37,0 14px 24px rgba(0,0,0,.85);}",
-        ".lb-sub{font-family:var(--rr-mono);font-size:.82rem;color:var(--rr-ink2);letter-spacing:.02em;}",
-        # cartões das mesas, inclinados um para o outro
-        ".lb-card{position:relative;border-radius:22px;padding:18px 22px 20px;background:linear-gradient(160deg,#1d2333,#111520 60%,#0d1018);"
-        "border:1px solid var(--rr-line);box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 8px 0 -2px #090b10,0 34px 50px -24px rgba(0,0,0,.95);"
-        "transform:perspective(1300px) rotateY(var(--ry,0deg)) rotateX(3deg);transition:transform .5s cubic-bezier(.2,.8,.2,1),box-shadow .5s;"
-        "overflow:hidden;margin-bottom:16px;}",
-        ".lb-card:hover{transform:perspective(1300px) rotateY(0deg) rotateX(0deg) translateY(-6px);box-shadow:inset 0 1px 0 rgba(255,255,255,.1),"
-        "0 12px 0 -2px #090b10,0 40px 60px -22px rgba(0,0,0,.95),0 0 46px -8px var(--lb-brilho);}",
-        ".lb-card::before{content:'';position:absolute;inset:0 0 auto 0;height:3px;background:var(--lb-faixa);}",
-        ".lb-roleta{--ry:9deg;--lb-brilho:rgba(255,45,75,.55);--lb-faixa:linear-gradient(90deg,var(--rr-red),#16181e,var(--rr-green));}",
-        ".lb-bacbo{--ry:-9deg;--lb-brilho:rgba(47,111,255,.55);--lb-faixa:linear-gradient(90deg,#2f6fff,var(--rr-gold),var(--rr-red));}",
-        ".lb-cena{height:260px;display:grid;place-items:center;perspective:760px;position:relative;}",
-        ".lb-cena::after{content:'';position:absolute;left:20%;right:20%;bottom:20px;height:30px;border-radius:50%;"
-        "background:radial-gradient(closest-side,rgba(0,0,0,.7),transparent);filter:blur(5px);}",
-        # roleta 3D: prato com as 37 casas na ordem da roda europeia, torre no meio e a bolinha
-        ".lb-mesa{position:relative;width:210px;height:210px;transform-style:preserve-3d;transform:rotateX(60deg);z-index:1;}",
-        f".lb-roda{{position:absolute;inset:0;border-radius:50%;transform-style:preserve-3d;animation:lb-gira 11s linear infinite;"
-        f"background:radial-gradient(circle,transparent 0 60%,rgba(0,0,0,.35) 60.5% 61.5%,transparent 62%),"
-        f"repeating-conic-gradient(rgba(212,171,85,.6) 0 .7deg,transparent .7deg {passo:.4f}deg),conic-gradient({casas});"
-        f"box-shadow:0 0 0 9px #5a3d1c,0 0 0 13px #d4ab55,0 0 0 16px #6d4f1c;}}",
-        ".lb-roda::before{content:'';position:absolute;inset:30%;border-radius:50%;"
-        "background:radial-gradient(circle at 40% 35%,#8a5f2c,#4a3115 65%,#2d1d0b);box-shadow:0 0 0 3px #d4ab55;}",
-        ".lb-roda::after{content:'';position:absolute;inset:-16px;border-radius:50%;background:linear-gradient(#3a2610,#120b04);"
-        "transform:translateZ(-20px);}",
-        ".lb-torre{position:absolute;left:50%;top:50%;width:38px;height:38px;margin:-19px 0 0 -19px;border-radius:50%;"
-        "background:radial-gradient(circle at 35% 30%,#fff5cf,#d4ab55 45%,#6d4f12);transform:translateZ(18px);"
-        "box-shadow:0 0 14px rgba(212,171,85,.55);}",
-        ".lb-orbita{position:absolute;inset:0;transform-style:preserve-3d;animation:lb-gira-inv 2.8s linear infinite;}",
-        ".lb-orbita i{position:absolute;left:50%;top:4%;width:15px;height:15px;margin-left:-7.5px;border-radius:50%;"
-        "background:radial-gradient(circle at 35% 30%,#fff,#d5d9e0 55%,#7d838e);transform:translateZ(7px);"
-        "box-shadow:0 0 8px rgba(255,255,255,.7);}",
-        "@keyframes lb-gira{to{transform:rotateZ(360deg)}}",
-        "@keyframes lb-gira-inv{to{transform:rotateZ(-360deg)}}",
-        # dados 3D (azul do Player, vermelho do Banker)
-        ".lb-dados{display:flex;gap:54px;position:relative;z-index:1;}",
-        ".lb-dado{width:74px;height:74px;position:relative;transform-style:preserve-3d;animation:lb-rola 7s linear infinite;}",
-        ".lb-dado.b{animation-duration:9.5s;animation-direction:reverse;}",
-        ".lb-dado span{position:absolute;inset:0;border-radius:14px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.16),inset 0 -8px 14px rgba(0,0,0,.35);}",
-        ".lb-dado.p span{background-color:#2f63df;}.lb-dado.b span{background-color:#d9262e;}",
-        "@keyframes lb-rola{0%{transform:rotateX(-20deg) rotateY(0deg) rotateZ(0deg)}"
-        "50%{transform:rotateX(200deg) rotateY(360deg) rotateZ(90deg)}100%{transform:rotateX(340deg) rotateY(720deg) rotateZ(360deg)}}",
-        # textos do cartão
-        ".lb-info{display:grid;gap:6px;position:relative;z-index:1;}",
-        ".lb-nome{font-family:var(--rr-display);font-weight:800;font-size:1.65rem;letter-spacing:-.02em;color:var(--rr-ink);}",
-        ".lb-desc{font-size:.92rem;color:var(--rr-ink2);}",
-        ".lb-linha{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;}",
-        ".lb-pill{display:inline-flex;align-items:center;gap:7px;font-family:var(--rr-mono);font-size:.74rem;padding:5px 11px;"
-        "border-radius:999px;background:var(--rr-surface2);border:1px solid var(--rr-line);color:var(--rr-ink2);}",
-        ".lb-pill i{width:7px;height:7px;border-radius:50%;background:var(--rr-muted);}",
-        ".lb-pill.on{color:var(--rr-good);border-color:rgba(47,209,122,.4);}.lb-pill.on i{background:var(--rr-green);animation:rr-ping 1.6s infinite;}",
-        ".lb-rodape{text-align:center;font-size:.82rem;color:var(--rr-muted);margin-top:18px;}",
-        # botões de entrar, com cara de tecla
-        ".st-key-lb_roleta button,.st-key-lb_bacbo button{width:100%;min-height:58px;border-radius:14px!important;border:0!important;"
-        "transition:transform .08s ease,box-shadow .08s ease;}",
-        ".st-key-lb_roleta button p,.st-key-lb_bacbo button p{font-family:var(--rr-display)!important;font-weight:800!important;"
-        "font-size:1.12rem!important;color:#fff!important;letter-spacing:.02em;}",
-        ".st-key-lb_roleta button{background:linear-gradient(180deg,#ff4d66,#c8102e)!important;box-shadow:0 6px 0 #6e0a1a,0 14px 22px rgba(0,0,0,.5)!important;}",
-        ".st-key-lb_bacbo button{background:linear-gradient(180deg,#5a8cff,#2f5fe0)!important;box-shadow:0 6px 0 #173a9a,0 14px 22px rgba(0,0,0,.5)!important;}",
-        ".st-key-lb_roleta button:active,.st-key-lb_bacbo button:active{transform:translateY(5px);box-shadow:0 1px 0 rgba(0,0,0,.6)!important;}",
-        "@media (max-width:900px){.lb-card{transform:none;}.lb-card:hover{transform:translateY(-3px);}.lb-cena{height:220px;}}",
-        "@media (prefers-reduced-motion:reduce){.lb-roda,.lb-orbita,.lb-dado{animation:none;}.lb-card{transition:none;}}",
-    ]
-    for nome, (valor, giro) in FACES_DADO.items():
-        pontos = ",".join(f"radial-gradient(circle at {x}% {y}%,#fff 0 7px,rgba(255,255,255,0) 8px)" for x, y in PONTOS_DADO[valor])
-        regras.append(f".lb-dado .{nome}{{transform:{giro};background-image:{pontos},"
-                      f"linear-gradient(145deg,rgba(255,255,255,.28),rgba(0,0,0,.28));}}")
-    return "".join(regras)
+    """Materiais e geometria 3D gerados em CSS; dados e roleta são decorativos."""
+    return r"""
+.element-container:has(iframe[height='0']),[data-testid='stElementContainer']:has(iframe[height='0']){position:absolute!important;width:0!important;height:0!important;overflow:hidden!important;margin:0!important;}
+.lb-topo{margin:0 0 28px;position:relative;}
+.stApp [data-testid='stAppDeployButton']{display:none;}
+.stApp h1.lb-titulo{font-family:Georgia,'Times New Roman',serif!important;font-weight:400!important;font-size:clamp(2.4rem,4.4vw,4rem)!important;letter-spacing:-.045em!important;line-height:1.08!important;}
+.stApp [data-testid='stHorizontalBlock']:has(.lb-card){display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px!important;}
+.stApp [data-testid='stHorizontalBlock']:has(.lb-card)>[data-testid='stColumn']{width:100%!important;min-width:0!important;}
+@media(max-width:1150px){.stApp [data-testid='stHorizontalBlock']:has(.lb-card){grid-template-columns:1fr;}}
+@media(max-width:700px){.stApp h1.lb-titulo{font-size:2.7rem!important;}}
+@media(max-width:380px){.stApp h1.lb-titulo{font-size:2.3rem!important;}}
+.lb-barra{display:flex;align-items:center;justify-content:space-between;gap:20px;padding-bottom:22px;border-bottom:1px solid #9f956222;}
+.lb-assinatura{display:flex;align-items:center;gap:10px;font-size:.72rem;letter-spacing:.18em;color:#e4d6b4;font-weight:500;}
+.lb-assinatura svg{width:25px;height:25px;flex:none;}
+.lb-edicao{font-family:var(--rr-mono);font-size:.58rem;letter-spacing:.13em;color:#a1ac93;}
+.lb-hero{display:flex;justify-content:space-between;gap:28px;align-items:flex-end;margin:28px 0 32px;}
+.lb-kicker{font-size:.59rem;letter-spacing:.23em;text-transform:uppercase;color:#d5b97a;font-family:var(--rr-mono);margin-bottom:12px;}
+.lb-titulo{font-family:Georgia,'Times New Roman',serif;font-size:clamp(2.4rem,4.4vw,4rem);font-weight:400;letter-spacing:-.045em;line-height:1.08;color:#f2ebdb;margin:0;text-shadow:0 4px 18px #0004;}
+.lb-titulo em{font-weight:400;font-style:italic;color:#d1b781;}
+.lb-sub{font-family:var(--rr-display);font-size:.9rem;line-height:1.75;color:#b0bba8;max-width:310px;margin:0 0 4px;}
+.lb-divisor{display:flex;align-items:center;gap:14px;font-family:var(--rr-mono);font-size:.58rem;letter-spacing:.17em;color:#adba9c;}
+.lb-divisor:after{content:'';height:1px;background:linear-gradient(90deg,#c5b27932,transparent);flex:1;}
+.lb-card{position:relative;border-radius:17px;padding:0;overflow:hidden;margin-bottom:0;border:1px solid #4c4b32;
+ background:linear-gradient(155deg,#1d281b,#101b13 85%);box-shadow:0 10px 32px #0003,inset 0 1px 0 #ffffff05;transition:border-color .25s,box-shadow .25s;}
+.lb-card:hover{border-color:#a68f57;box-shadow:0 12px 35px #0005,inset 0 1px 0 #ffffff08;}
+.lb-card:after{content:'';position:absolute;inset:0;border-radius:inherit;border:1px solid #d2c69a05;pointer-events:none;}
+.lb-card-top{position:absolute;z-index:9;inset:17px 19px auto;display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.lb-card-index{font-family:var(--rr-mono);font-size:.55rem;color:#aeba9e;letter-spacing:.17em;}
+.lb-card-format{font-family:var(--rr-mono);font-size:.53rem;letter-spacing:.1em;color:#cfc090;border:1px solid #b1a5752b;background:#0a140d77;padding:5px 8px;border-radius:4px;}
+.lb-cena{height:300px;position:relative;isolation:isolate;overflow:hidden;display:flex;align-items:center;justify-content:center;
+ background:radial-gradient(ellipse at 48% 36%,#43533b 0%,#243c29 35%,#132a1b 70%,#102016 100%);border-bottom:1px solid #8e895529;}
+.lb-cena:before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(0deg,#afc99b04 0px,#afc99b04 1px,transparent 1px,transparent 3px),repeating-linear-gradient(90deg,#00000005 0px,#00000005 1px,transparent 1px,transparent 3px);mix-blend-mode:screen;pointer-events:none;}
+.lb-cena:after{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 40% 12%,#f9dca621,transparent 62%),linear-gradient(0deg,#08120d5c,transparent 30%);pointer-events:none;z-index:8;}
+.lb-stage-code{position:absolute;bottom:14px;left:19px;z-index:9;color:#a4b8958c;font-family:var(--rr-mono);font-size:.48rem;letter-spacing:.18em;}
+.lb-stage-mark{position:absolute;right:19px;bottom:13px;font-family:Georgia,serif;font-style:italic;font-size:.85rem;letter-spacing:.02em;color:#bec5a23d;z-index:9;}
+.lb-info{padding:22px 22px 20px;position:relative;z-index:9;background:linear-gradient(135deg,#1b271b,#111c13);}
+.lb-info-top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;}
+.lb-nome{font-family:Georgia,'Times New Roman',serif;font-weight:400;font-size:1.8rem;line-height:1.15;letter-spacing:-.035em;color:#f1e9d9;}
+.lb-arrow{font-family:var(--rr-display);font-size:1.4rem;color:#cfb477;opacity:.8;}
+.lb-desc{font-size:.77rem;line-height:1.6;color:#afbea4;min-height:25px;}
+.lb-linha{display:flex;gap:7px;flex-wrap:wrap;margin-top:17px;padding-top:16px;border-top:1px solid #9d9c6320;}
+.lb-pill{display:inline-flex;gap:6px;align-items:center;font-family:var(--rr-mono);font-size:.67rem;line-height:1.3;padding:5px 7px;border-radius:4px;background:#ffffff03;border:1px solid #7b8e6126;color:#a6b699;}
+.lb-pill i{width:5px;height:5px;display:inline-block;border-radius:50%;background:#89977d;flex:none;}
+.lb-pill.on{color:#b5deba;border-color:#73ba8d55;background:#80c19909;}.lb-pill.on i{background:#8dd5a4;box-shadow:0 0 5px #89d2a844;}
+.lb-rodape{margin-top:24px;padding-top:18px;border-top:1px solid #83965d22;display:flex;justify-content:space-between;align-items:center;gap:24px;font-size:.68rem;line-height:1.6;color:#98a68b;}
+.lb-rodape b{font-family:var(--rr-mono);font-weight:400;font-size:.57rem;letter-spacing:.14em;color:#b7b48d;white-space:nowrap;}
+.st-key-lb_roleta button,.st-key-lb_bacbo button{width:100%;min-height:48px!important;border-radius:9px!important;border:1px solid #dac18b!important;background:linear-gradient(120deg,#ddc58f,#bda16b)!important;box-shadow:inset 0 1px 0 #fff6,0 5px 12px #0003!important;}
+.st-key-lb_roleta button p,.st-key-lb_bacbo button p{color:#172015!important;font-size:.85rem!important;font-weight:650!important;letter-spacing:.02em;}
+.st-key-lb_roleta button:hover,.st-key-lb_bacbo button:hover{background:linear-gradient(120deg,#ecdbaf,#c7af7b)!important;transform:translateY(-1px);}
+.st-key-lb_roleta button:active,.st-key-lb_bacbo button:active{transform:translateY(1px);}
+/* A moldura permanece fixa: somente o prato e a esfera giram. */
+.lb-wheel-wrap{position:relative;width:min(88%,365px);aspect-ratio:1;perspective:900px;transform:translateY(3px);z-index:2;flex:none;}
+.lb-wheel-shadow{position:absolute;inset:29% 3% 4%;border-radius:50%;background:#020804;filter:blur(12px);opacity:.75;transform:translateY(21px);}
+.lb-wheel-base{position:absolute;inset:0;border-radius:50%;background:linear-gradient(145deg,#8b5930,#392112 45%,#160f09 100%);transform:rotateX(43deg) rotateZ(-12deg) translateZ(-17px);box-shadow:0 18px 0 #2a190e,0 22px 0 #14110a;}
+.lb-wheel{position:absolute;inset:0;transform-style:preserve-3d;transform:rotateX(43deg) rotateZ(-12deg);}
+.lb-wheel>svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;}
+.lb-wheel .lb-rotor{animation:lb-wheel-turn 38s linear infinite;transform-origin:50% 50%;}
+.lb-wheel .lb-ball-orbit{animation:lb-ball-turn 13s linear infinite;transform-origin:50% 50%;}
+.lb-wheel .lb-gloss{pointer-events:none;}
+@keyframes lb-wheel-turn{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes lb-ball-turn{from{transform:rotate(45deg)}to{transform:rotate(-315deg)}}
+/* Fichas em cerâmica, vistas em perspectiva sobre o feltro. */
+.lb-chip-stack{position:absolute;left:25px;bottom:39px;width:44px;height:44px;z-index:7;transform:rotateX(43deg) rotateZ(-18deg);border-radius:50%;
+ background:radial-gradient(circle,#344132 0 40%,#d4c49b 41% 43%,#283d29 44% 62%,transparent 63%),repeating-conic-gradient(#d5c6a0 0 11deg,#315537 11deg 55deg,#d5c6a0 55deg 66deg,#315537 66deg 120deg);
+ box-shadow:0 3px 0 #b6aa87,0 5px 0 #243c27,0 7px 0 #c6b68e,0 9px 0 #27462d,0 12px 10px #0008;border:1px solid #d4c8a2;}
+.lb-chip-stack:after{content:'10';position:absolute;inset:0;display:grid;place-items:center;font-family:Georgia,serif;font-size:.75rem;color:#d1c59e;}
+/* Quatro cúpulas de vidro, duas para cada lado, com bases de latão. */
+.lb-bacbo .lb-cena{background:radial-gradient(ellipse at 48% 36%,#3f503d,#203c2b 38%,#10271d 78%);}
+.lb-felt-oval{position:absolute;width:78%;height:65%;left:11%;top:23%;border:1px solid #b7b58a26;border-radius:50%;transform:rotateX(33deg);box-shadow:0 0 0 7px #0f221a44,0 0 0 8px #b7b58a16;}
+.lb-shakers{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;width:90%;max-width:390px;align-items:end;z-index:3;margin-top:-4px;}
+.lb-shaker{position:relative;height:146px;perspective:550px;--die:46px;--half:23px;}
+.lb-shaker:after{content:'';position:absolute;bottom:2px;left:0;right:0;height:20px;background:#020703;filter:blur(6px);border-radius:50%;z-index:0;}
+.lb-shaker-base{position:absolute;bottom:8px;left:0;right:0;height:25px;border-radius:50%;z-index:2;
+ background:linear-gradient(105deg,#756039 0%,#eddaa3 18%,#b79a5b 34%,#6a552c 55%,#dfcb96 77%,#756039 100%);border:1px solid #b49d6b;box-shadow:inset 0 -5px 3px #30270e,0 4px 0 #2a2614;}
+.lb-shaker-base:after{content:'';position:absolute;inset:2px 3px 7px;border-radius:50%;background:radial-gradient(ellipse,#173327,#33513a 70%,#b9a373 74%,#685a30 80%);}
+.lb-shaker-glass{position:absolute;bottom:19px;left:2%;right:2%;height:111px;border-radius:46% 46% 22% 22% / 39% 39% 13% 13%;z-index:7;
+ background:linear-gradient(100deg,#e3f7dc0d,#d8eddd06 13%,#e8f8e22c 18%,#edfbe002 25%,transparent 63%,#e8f8e61f 87%,#e8f8e90e),linear-gradient(180deg,#f4ffe00b,transparent 64%,#e3efd519);
+ border:1px solid #e3f2d733;box-shadow:inset 2px 0 4px #edfadf16,inset -2px 1px 3px #edfadf12;pointer-events:none;}
+.lb-shaker-glass:before{content:'';position:absolute;inset:6px 10px 38%;border-top:2px solid #f3ffe442;border-radius:50%;transform:rotate(-14deg);}
+.lb-shaker-glass:after{content:'';position:absolute;width:8%;height:55%;left:15%;top:17%;border-radius:80%;background:#f3ffea33;filter:blur(1px);transform:rotate(5deg);}
+.lb-cube{--rx:-21deg;--ry:-29deg;--rz:-3deg;position:absolute;left:calc(50% - var(--half));bottom:39px;width:var(--die);height:var(--die);transform-style:preserve-3d;z-index:4;transform:rotateX(var(--rx)) rotateY(var(--ry)) rotateZ(var(--rz));animation:lb-dice-settle 17s ease-in-out infinite;}
+.lb-shaker:nth-child(2) .lb-cube{--rx:-18deg;--ry:132deg;--rz:4deg;animation-delay:-4.8s;}.lb-shaker:nth-child(3) .lb-cube{--rx:-28deg;--ry:-64deg;--rz:-2deg;animation-delay:-9.3s;}.lb-shaker:nth-child(4) .lb-cube{--rx:29deg;--ry:57deg;--rz:3deg;animation-delay:-12.7s;}
+.lb-cube>span{position:absolute;inset:0;border-radius:8px;backface-visibility:hidden;border:1px solid #b6d5ed66;background:linear-gradient(135deg,#6793ad,#285574 68%,#1b3e58);box-shadow:inset 0 1px 4px #ffffff25,inset -3px -3px 6px #091c3455;}
+.lb-cube.b>span{border-color:#efb7ab55;background:linear-gradient(135deg,#c27d72,#8c393e 68%,#59232e);box-shadow:inset 0 1px 4px #ffffff20,inset -3px -3px 6px #300a1455;}
+.lb-cube .f1{transform:translateZ(var(--half));}.lb-cube .f2{transform:rotateY(90deg) translateZ(var(--half));}
+.lb-cube .f3{transform:rotateY(180deg) translateZ(var(--half));}.lb-cube .f4{transform:rotateY(-90deg) translateZ(var(--half));}
+.lb-cube .f5{transform:rotateX(90deg) translateZ(var(--half));}.lb-cube .f6{transform:rotateX(-90deg) translateZ(var(--half));}
+.lb-pip{position:absolute;width:15%;height:15%;margin:-7.5%;border-radius:50%;background:radial-gradient(circle at 55% 60%,#f3f1d9,#d4dece 70%,#818f88);box-shadow:inset 1px 1px 2px #19334890,0 1px 0 #ffffff27;}
+.lb-shaker-label{position:absolute;bottom:-13px;left:0;right:0;text-align:center;font-family:var(--rr-mono);font-size:.44rem;letter-spacing:.12em;color:#b5c9b4;}
+.lb-bacbo-layout{position:absolute;bottom:30px;left:15%;right:15%;display:grid;grid-template-columns:1fr .7fr 1fr;z-index:4;}
+.lb-bacbo-layout span{text-align:center;padding:7px 4px;border:1px solid #b4c39330;font-family:Georgia,serif;font-size:.54rem;letter-spacing:.12em;color:#d5d4b380;}
+.lb-bacbo-layout span:first-child{border-radius:10px 0 0 10px;color:#a5c5d78f;}.lb-bacbo-layout span:last-child{border-radius:0 10px 10px 0;color:#e4afa28f;}
+@keyframes lb-dice-settle{0%,55%,100%{transform:rotateX(var(--rx)) rotateY(var(--ry)) rotateZ(var(--rz))}61%{transform:translateY(-4px) rotateX(calc(var(--rx) + 176deg)) rotateY(calc(var(--ry) + 99deg)) rotateZ(calc(var(--rz) + 11deg))}68%{transform:translateY(-2px) rotateX(calc(var(--rx) + 360deg)) rotateY(calc(var(--ry) + 360deg)) rotateZ(var(--rz))}74%,99%{transform:rotateX(calc(var(--rx) + 360deg)) rotateY(calc(var(--ry) + 360deg)) rotateZ(var(--rz))}}
+@media(max-width:1100px){.lb-hero{gap:20px;}.lb-sub{max-width:260px;font-size:.8rem;}.lb-cena{height:280px;}.lb-info{padding:19px 17px;}.lb-shakers{gap:6px;}.lb-shaker{--die:40px;--half:20px;height:134px;}.lb-shaker-glass{height:100px;}.lb-card-top{inset:15px 16px auto;}}
+@media(max-width:850px){.lb-hero{display:block;margin:24px 0;}.lb-sub{max-width:440px;margin-top:18px;}.lb-cena{height:265px;}.lb-shaker{--die:35px;--half:17.5px;}.lb-shaker-glass{height:95px;}.lb-card-format{font-size:.47rem;}.lb-nome{font-size:1.65rem;}.lb-desc{min-height:40px;}}
+@media(max-width:700px){.lb-barra{padding-bottom:17px;}.lb-assinatura{font-size:.6rem;letter-spacing:.13em;}.lb-edicao{font-size:.46rem;}.lb-hero{margin:22px 0 25px;}.lb-titulo{font-size:2.7rem;}.lb-sub{font-size:.8rem;margin-top:15px;}.lb-topo{margin-bottom:20px;}.lb-cena{height:284px;}.lb-info{padding:20px 19px;}.lb-desc{min-height:0;}.lb-shakers{max-width:345px;gap:7px;}.lb-shaker{--die:42px;--half:21px;height:137px;}.lb-shaker-glass{height:106px;}.lb-rodape{display:block;margin-top:18px;padding-top:17px;font-size:.65rem;}.lb-rodape b{display:block;margin-top:10px;}.lb-pill{font-size:.56rem;}.lb-stage-code{font-size:.43rem;}}
+@media(max-width:380px){.lb-titulo{font-size:2.3rem;}.lb-edicao{display:none;}.lb-cena{height:265px;}.lb-shaker{--die:35px;--half:17.5px;}.lb-shaker-glass{height:94px;}.lb-shakers{gap:4px;}.lb-nome{font-size:1.6rem;}}
+@media(prefers-reduced-motion:reduce){.lb-rotor,.lb-ball-orbit,.lb-cube{animation:none!important;}.lb-card{transition:none;}}
+"""
+
+def _svg_roleta_realista() -> str:
+    """37 setores na ordem europeia. A decoração não representa um giro real."""
+    def ponto(raio, angulo):
+        rad = math.radians(angulo)
+        return 250 + raio*math.sin(rad), 250 - raio*math.cos(rad)
+
+    def arco(raio_externo, raio_interno, inicio, fim):
+        a, b, c, d = ponto(raio_externo, inicio), ponto(raio_externo, fim), ponto(raio_interno, fim), ponto(raio_interno, inicio)
+        return (f'M {a[0]:.3f} {a[1]:.3f} A {raio_externo} {raio_externo} 0 0 1 {b[0]:.3f} {b[1]:.3f} '
+                f'L {c[0]:.3f} {c[1]:.3f} A {raio_interno} {raio_interno} 0 0 0 {d[0]:.3f} {d[1]:.3f} Z')
+
+    defs = ('<defs><radialGradient id="lb-gold"><stop offset="0" stop-color="#fff0bd"/>'
+            '<stop offset=".45" stop-color="#d2b46e"/><stop offset=".7" stop-color="#85602f"/>'
+            '<stop offset=".9" stop-color="#e6cf92"/><stop offset="1" stop-color="#82623a"/></radialGradient>'
+            '<linearGradient id="lb-wood" x2="1" y2="1"><stop stop-color="#a36c3e"/>'
+            '<stop offset=".27" stop-color="#56341c"/><stop offset=".54" stop-color="#815332"/>'
+            '<stop offset=".8" stop-color="#3a2416"/><stop offset="1" stop-color="#67452b"/></linearGradient>'
+            '<radialGradient id="lb-bowl"><stop stop-color="#9f6538"/><stop offset=".55" stop-color="#765035"/>'
+            '<stop offset=".8" stop-color="#4b301e"/><stop offset="1" stop-color="#251d13"/></radialGradient>'
+            '<radialGradient id="lb-ball"><stop offset="0" stop-color="#fffdf0"/>'
+            '<stop offset=".45" stop-color="#eee9d6"/><stop offset="1" stop-color="#93998d"/></radialGradient>'
+            '<linearGradient id="lb-shine" x2=".8" y2="1"><stop stop-color="#fef2c8" stop-opacity=".23"/>'
+            '<stop offset=".36" stop-color="#fff3c4" stop-opacity="0"/><stop offset=".82" stop-color="#080d06" stop-opacity=".2"/>'
+            '<stop offset="1" stop-color="#e3caa2" stop-opacity=".08"/></linearGradient></defs>')
+    frame = ('<svg class="lb-frame" viewBox="0 0 500 500" aria-hidden="true">' + defs +
+             '<circle cx="250" cy="250" r="239" fill="#20160e"/>'
+             '<circle cx="250" cy="250" r="235" fill="url(#lb-gold)"/>'
+             '<circle cx="250" cy="250" r="229" fill="url(#lb-wood)" stroke="#261c11" stroke-width="2"/>'
+             '<circle cx="250" cy="250" r="219" fill="none" stroke="#d5b679" stroke-opacity=".37" stroke-width="1"/>'
+             '<circle cx="250" cy="250" r="214" fill="url(#lb-gold)"/>'
+             '<circle cx="250" cy="250" r="208" fill="#171b13"/>'
+             '<circle cx="250" cy="250" r="202" fill="none" stroke="#8a784d" stroke-width="2"/>'
+             '<circle cx="250" cy="250" r="191" fill="url(#lb-gold)"/>'
+             '<circle cx="250" cy="250" r="188" fill="#1b2319"/></svg>')
+    setores, passo = [], 360/37
+    for i, numero in enumerate(RODA_EUROPEIA):
+        inicio, fim, meio = i*passo-passo/2, (i+1)*passo-passo/2, i*passo
+        cor = '#34784e' if numero == 0 else ('#a63a45' if numero in NUMEROS_VERMELHOS else '#17221b')
+        setores.append(f'<g class="lb-pocket" data-numero="{numero}"><path d="{arco(187,148,inicio,fim)}" '
+                       f'fill="{cor}" stroke="#bfa365" stroke-width=".9"/>')
+        x, y = ponto(173, meio)
+        setores.append(f'<text x="{x:.3f}" y="{y:.3f}" text-anchor="middle" dominant-baseline="middle" '
+                       f'transform="rotate({meio:.3f} {x:.3f} {y:.3f})" '
+                       f'font-family="Georgia,serif" font-size="13" fill="#f6ebd1">{numero}</text>')
+        setores.append(f'<path d="{arco(157,148,inicio+.7,fim-.7)}" fill="#040b06" fill-opacity=".43"/></g>')
+    bowl = ('<circle cx="250" cy="250" r="146" fill="url(#lb-bowl)" stroke="#b39155" stroke-width="2"/>')
+    for raio in (140, 132, 122, 109, 94):
+        bowl += f'<circle cx="250" cy="250" r="{raio}" fill="none" stroke="#c79b63" stroke-opacity=".12"/>'
+    for a in range(0, 360, 45):
+        x, y = ponto(145, a)
+        bowl += f'<path d="M250 250L{x:.2f} {y:.2f}" stroke="#241b12" stroke-opacity=".38" stroke-width="1.8"/>'
+    rotor = '<svg class="lb-rotor" viewBox="0 0 500 500" aria-hidden="true">' + ''.join(setores) + bowl + '</svg>'
+    spindle = ('<svg class="lb-spindle" viewBox="0 0 500 500" aria-hidden="true">'
+               '<ellipse cx="250" cy="260" rx="43" ry="40" fill="#130f08" opacity=".4"/>'
+               '<circle cx="250" cy="250" r="39" fill="url(#lb-gold)" stroke="#4b3c21" stroke-width="2"/>'
+               '<path d="M218 248 Q250 164 282 248 Q250 273 218 248" fill="url(#lb-gold)" stroke="#8e6d38"/>'
+               '<path d="M217 218 L283 218 M250 185 L250 250" stroke="#41351d" stroke-width="9" stroke-linecap="round"/>'
+               '<path d="M217 215 L283 215 M250 181 L250 247" stroke="url(#lb-gold)" stroke-width="7" stroke-linecap="round"/>'
+               '<circle cx="250" cy="213" r="12" fill="url(#lb-gold)"/>'
+               '<circle cx="215" cy="215" r="5" fill="#e7d3a1"/><circle cx="285" cy="215" r="5" fill="#b7985d"/>'
+               '<circle cx="250" cy="181" r="6" fill="#f1db9f"/></svg>')
+    ball = ('<svg class="lb-ball-orbit" viewBox="0 0 500 500" aria-hidden="true">'
+            '<ellipse cx="250" cy="48" rx="8" ry="6" fill="#040905" opacity=".7"/>'
+            '<circle cx="250" cy="43" r="7.5" fill="url(#lb-ball)"/><circle cx="247.5" cy="40" r="2" fill="#fffdf4"/></svg>')
+    gloss = ('<svg class="lb-gloss" viewBox="0 0 500 500" aria-hidden="true">'
+             '<circle cx="250" cy="250" r="235" fill="url(#lb-shine)"/>'
+             '<path d="M75 117A222 222 0 0 1 350 50" fill="none" stroke="#fff5cf" stroke-opacity=".33" stroke-width="1.5"/></svg>')
+    return '<div class="lb-wheel-wrap"><div class="lb-wheel-shadow"></div><div class="lb-wheel-base"></div><div class="lb-wheel">' + frame + rotor + spindle + ball + gloss + '</div></div>'
+
+def _dados_realistas() -> str:
+    dados = []
+    for i in range(4):
+        faces = []
+        for nome, (valor, _) in FACES_DADO.items():
+            pontos = ''.join(f'<i class="lb-pip" style="left:{x}%;top:{y}%"></i>' for x, y in PONTOS_DADO[valor])
+            faces.append(f'<span class="{nome}">{pontos}</span>')
+        dados.append('<div class="lb-shaker"><div class="lb-shaker-base"></div>'
+                     f'<div class="lb-cube {"p" if i < 2 else "b"}">{"".join(faces)}</div>'
+                     '<div class="lb-shaker-glass"></div>'
+                     f'<div class="lb-shaker-label">{"PLAYER" if i < 2 else "BANKER"} {i%2+1}</div></div>')
+    return '<div class="lb-felt-oval"></div><div class="lb-shakers">' + ''.join(dados) + '</div><div class="lb-bacbo-layout"><span>PLAYER</span><span>TIE</span><span>BANKER</span></div>'
+
 
 
 def _tela_inicial(st, sessao: SessaoWeb, no_meu_pc: bool) -> str:
@@ -4588,31 +4851,39 @@ def _ir_para_lobby() -> None:
 class HtmlLobby:
     @staticmethod
     def topo() -> str:
-        return ('<div class="lb-topo"><div class="rr-sub">Robô de sinais · leitura ao vivo</div>'
-                '<div class="lb-titulo" role="heading" aria-level="1">Escolha a mesa</div>'
-                '<div class="lb-sub">O robô acompanha a mesa pelo seu Chrome, avisa os gatilhos e confere cada entrada sozinho.</div></div>')
+        logo = ('<svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="none" stroke="#c8ad74" stroke-width="1"/>'
+                '<circle cx="16" cy="16" r="9" fill="none" stroke="#c8ad74" stroke-width=".7"/>'
+                '<path d="M16 2V7M30 16H25M16 30V25M2 16H7M6 6L10 10M26 6L22 10M26 26L22 22M6 26L10 22" stroke="#c8ad74" stroke-width="1"/>'
+                '<circle cx="16" cy="16" r="2" fill="#c8ad74"/></svg>')
+        return ('<div class="lb-topo"><div class="lb-barra"><div class="lb-assinatura">' + logo +
+                'MESA DE ANÁLISE</div><div class="lb-edicao">ROLETA &amp; BAC BO</div></div>'
+                '<div class="lb-hero"><div><div class="lb-kicker">Uma nova perspectiva da sua sessão</div>'
+                '<h1 class="lb-titulo">Sua próxima análise<br>começa <em>aqui.</em></h1></div>'
+                '<p class="lb-sub">Escolha a mesa. Acompanhe cada rodada, compare os padrões e mantenha sua sessão à vista.</p></div>'
+                '<div class="lb-divisor">ESCOLHA SUA MESA</div></div>')
 
     @staticmethod
     def _pills(itens: List[Tuple[str, bool]]) -> str:
-        return '<div class="lb-linha">' + "".join(
-            f'<span class="lb-pill{" on" if ligado else ""}"><i></i>{html.escape(texto)}</span>' for texto, ligado in itens) + "</div>"
+        return '<div class="lb-linha">' + ''.join(
+            f'<span class="lb-pill{" on" if ligado else ""}"><i></i>{html.escape(texto)}</span>' for texto, ligado in itens) + '</div>'
 
     @classmethod
     def roleta(cls, pills: List[Tuple[str, bool]]) -> str:
-        return ('<div class="lb-card lb-roleta"><div class="lb-cena" aria-hidden="true"><div class="lb-mesa">'
-                '<div class="lb-roda"><b class="lb-torre"></b></div><div class="lb-orbita"><i></i></div></div></div>'
-                '<div class="lb-info"><div class="lb-nome">Immersive Roulette</div>'
-                '<div class="lb-desc">Roleta europeia · padrões de cor, dúzia e coluna</div>'
-                + cls._pills(pills) + "</div></div>")
+        return ('<div class="lb-card lb-roleta"><div class="lb-card-top"><span class="lb-card-index">01 / ROLETA</span>'
+                '<span class="lb-card-format">EUROPEIA · 37 CASAS</span></div><div class="lb-cena" aria-hidden="true">' +
+                _svg_roleta_realista() + '<div class="lb-chip-stack"></div><span class="lb-stage-code">ZERO ÚNICO / 0—36</span>'
+                '<span class="lb-stage-mark">European wheel</span></div><div class="lb-info"><div class="lb-info-top">'
+                '<div class="lb-nome">Roleta europeia</div><span class="lb-arrow">↗</span></div>'
+                '<div class="lb-desc">Cor, dúzias e colunas. Cada giro à vista.</div>' + cls._pills(pills) + '</div></div>')
 
     @classmethod
     def bacbo(cls, pills: List[Tuple[str, bool]]) -> str:
-        faces = "".join(f'<span class="{nome}"></span>' for nome in FACES_DADO)
-        return ('<div class="lb-card lb-bacbo"><div class="lb-cena" aria-hidden="true"><div class="lb-dados">'
-                f'<div class="lb-dado p">{faces}</div><div class="lb-dado b">{faces}</div></div></div>'
-                '<div class="lb-info"><div class="lb-nome">Bac Bo</div>'
-                '<div class="lb-desc">Player x Banker nos dados · seis padrões prontos e os seus</div>'
-                + cls._pills(pills) + "</div></div>")
+        return ('<div class="lb-card lb-bacbo"><div class="lb-card-top"><span class="lb-card-index">02 / BAC BO</span>'
+                '<span class="lb-card-format">QUATRO DADOS</span></div><div class="lb-cena" aria-hidden="true">' +
+                _dados_realistas() + '<span class="lb-stage-code">PLAYER × BANKER</span><span class="lb-stage-mark">Dice table</span>'
+                '</div><div class="lb-info"><div class="lb-info-top"><div class="lb-nome">Bac Bo</div><span class="lb-arrow">↗</span></div>'
+                '<div class="lb-desc">Quatro dados. Dois lados. Rodada por rodada.</div>' + cls._pills(pills) + '</div></div>')
+
 
 
 def tela_lobby(st, sessao: SessaoWeb, no_meu_pc: bool) -> None:
@@ -4634,13 +4905,13 @@ def tela_lobby(st, sessao: SessaoWeb, no_meu_pc: bool) -> None:
     esquerda, direita = st.columns(2, gap="large")
     with esquerda:
         st.markdown(HtmlLobby.roleta(pills_roleta), unsafe_allow_html=True)
-        st.button("Entrar na Roleta", key="lb_roleta", type="primary", on_click=_entrar_no_jogo, args=(JOGO_ROLETA,))
+        st.button("Entrar na Roleta", key="lb_roleta", type="primary", use_container_width=True, on_click=_entrar_no_jogo, args=(JOGO_ROLETA,))
     with direita:
         st.markdown(HtmlLobby.bacbo(pills_bacbo), unsafe_allow_html=True)
-        st.button("Entrar no Bac Bo", key="lb_bacbo", type="primary", on_click=_entrar_no_jogo, args=(JOGO_BACBO,))
+        st.button("Entrar no Bac Bo", key="lb_bacbo", type="primary", use_container_width=True, on_click=_entrar_no_jogo, args=(JOGO_BACBO,))
     rodape = ("A mesa que estiver sendo lida continua lendo enquanto você está aqui no lobby." if no_meu_pc else
               "O robô só observa. Nenhuma aposta é feita: todos os valores são de uma banca fictícia.")
-    st.markdown(f'<div class="lb-rodape">{rodape}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="lb-rodape"><span>{html.escape(rodape)}</span><b>PRÉVIA ILUSTRATIVA DAS MESAS</b></div>', unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------------
@@ -4752,6 +5023,838 @@ def rodando_no_streamlit() -> bool:
             return get_script_run_ctx() is not None
     except Exception:
         return False
+
+
+# ===================================================================================
+# 14) PESQUISA DE PADRÕES, VALIDAÇÃO CRONOLÓGICA E ACOMPANHAMENTO EM OBSERVAÇÃO
+# -----------------------------------------------------------------------------------
+# Hipóteses experimentais. Nenhum padrão abaixo altera a probabilidade de uma mesa
+# justa/independente. Fontes e hipóteses estatísticas: FONTES_E_METODOLOGIA.md.
+# O motor original permanece disponível para reproduzir os testes de aceitação.
+# ===================================================================================
+VERSAO_ANALISE = "2.0.0-pesquisa"
+LIMITE_REGISTROS_PESQUISA = 200_000
+FONTES_PESQUISA = {
+    "Evolution — regras do Bac Bo": "https://games.evolution.com/live-casino/live-craps-and-dice/bac-bo/",
+    "Operador — pagamentos do Bac Bo": "https://www.cloudbet.com/pt-br/casino/play/evolution/ev_bac_bo",
+    "NIST — intervalo de Wilson": "https://www.itl.nist.gov/div898/handbook/prc/section2/prc241.htm",
+    "NIST — comparações múltiplas": "https://www.itl.nist.gov/div898/handbook/prc/section4/prc473.htm",
+    "Hoeffding (1963) — retornos limitados": "https://www.tandfonline.com/doi/abs/10.1080/01621459.1963.10500830",
+    "Gambling Commission — retorno e vantagem da casa":
+        "https://www.gamblingcommission.gov.uk/public-and-players/guide/return-to-player-how-much-gaming-machines-payout/",
+}
+
+
+@dataclass(frozen=True)
+class ConfigPesquisa:
+    valor_por_alvo: float = 10.0
+    protecao: float = 0.0
+    banca_inicial: float = 1000.0
+    minimo_sinais: int = 200
+    meta_acerto: float = 0.60
+    alpha: float = 0.05
+    exposicao_maxima: float = 0.02
+    stop_loss: float = 0.10
+    stop_gain: float = 0.10
+
+    def __post_init__(self) -> None:
+        valores = (self.valor_por_alvo, self.protecao, self.banca_inicial, self.meta_acerto,
+                   self.alpha, self.exposicao_maxima, self.stop_loss, self.stop_gain)
+        if any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in valores):
+            raise ValueError("Use valores numéricos finitos na configuração de pesquisa.")
+        if self.valor_por_alvo <= 0 or self.protecao < 0 or self.banca_inicial <= 0:
+            raise ValueError("Banca e ficha precisam ser positivas; proteção não pode ser negativa.")
+        if isinstance(self.minimo_sinais, bool) or not isinstance(self.minimo_sinais, int) or self.minimo_sinais < 30:
+            raise ValueError("O mínimo precisa ser um inteiro de pelo menos 30 sinais por período.")
+        if not 0.60 <= self.meta_acerto < 1 or not 0 < self.alpha < 0.5:
+            raise ValueError("A meta precisa estar entre 60% e 100% exclusivo; alpha entre 0 e 0,5.")
+        if any(not 0 < v <= 1 for v in (self.exposicao_maxima, self.stop_loss, self.stop_gain)):
+            raise ValueError("Os limites de exposição e de parada precisam estar entre 0 e 100%.")
+
+
+@dataclass(frozen=True)
+class RegistroPesquisa:
+    identificador: str
+    mesa: str
+    evento: object
+    horario: Optional[datetime] = None
+    origem: str = "informado"
+
+
+@dataclass(frozen=True)
+class AlvoPesquisa:
+    familia: str
+    alvos: tuple
+
+
+@dataclass(frozen=True)
+class PadraoPesquisa:
+    chave: str
+    jogo: str
+    nome: str
+    familia: str
+    gatilho: int
+    modo: str
+
+    def prever(self, historico: list) -> Optional[AlvoPesquisa]:
+        """Usa SOMENTE o passado. O alvo retornado vale para a rodada seguinte."""
+        if len(historico) < self.gatilho:
+            return None
+        if self.jogo == "bacbo":
+            valores = [r.resultado for r in historico]
+            if self.modo == "pos_empate":
+                return AlvoPesquisa("bacbo", (EMPATE,)) if valores[-1] == EMPATE else None
+            if self.modo == "retomar":
+                return (AlvoPesquisa("bacbo", (valores[-2],))
+                        if valores[-1] == EMPATE and valores[-2] in OPOSTO else None)
+            pares = (PLAYER, BANKER)
+        else:
+            valores = [_valor_familia(g, self.familia) for g in historico]
+            pares = (VERMELHO, PRETO) if self.familia == "cor" else (0, 1)
+        ultimo = valores[-1]
+        if ultimo is None or ultimo == EMPATE:
+            return None
+        n = 0
+        for v in reversed(valores):
+            if v != ultimo:
+                break
+            n += 1
+        if self.modo in ("seguir", "inverter", "cobrir"):
+            if n != self.gatilho:
+                return None
+            if self.modo == "cobrir":
+                alvos = tuple(v for v in (1, 2, 3) if v != ultimo)
+            elif self.modo == "seguir":
+                alvos = (ultimo,)
+            else:
+                alvos = (pares[1] if ultimo == pares[0] else pares[0],)
+        elif self.modo in ("alternar", "quebrar"):
+            n = 1
+            while (n < len(valores) and valores[-1-n] not in (None, EMPATE)
+                   and valores[-1-n] != valores[-n]):
+                n += 1
+            if n != self.gatilho:
+                return None
+            alvos = (ultimo if self.modo == "quebrar" else
+                     (pares[1] if ultimo == pares[0] else pares[0]),)
+        elif self.modo in ("duplas", "triplas"):
+            k = self.gatilho // 2
+            a, b = valores[-2*k:-k], valores[-k:]
+            if (None in a + b or EMPATE in a + b or len(set(a)) != 1
+                    or len(set(b)) != 1 or a[0] == b[0] or n != k):
+                return None
+            alvos = (a[0],)
+        else:
+            raise ValueError(f"Modo de padrão desconhecido: {self.modo}")
+        return AlvoPesquisa("bacbo" if self.jogo == "bacbo" else self.familia, alvos)
+
+
+def _valor_familia(giro: Giro, familia: str):
+    if giro.numero == 0:
+        return None
+    if familia == "paridade":
+        return giro.numero % 2  # 0 = par, 1 = ímpar
+    if familia == "metade":
+        return int(giro.numero > 18)
+    return getattr(giro, familia)
+
+
+def catalogo_pesquisa(jogo: str) -> List[PadraoPesquisa]:
+    """Catálogo fixo antes da divisão dos dados; sem mineração do conjunto de teste."""
+    if jogo not in ("roleta", "bacbo"):
+        raise ValueError("Escolha roleta ou bacbo.")
+    linhas = []
+    if jogo == "roleta":
+        for n in (3, 4, 5):
+            linhas.append((f"cor_inv{n}", f"Cor: {n} iguais → oposta", "cor", n, "inverter"))
+        for n in (3, 4):
+            linhas.append((f"cor_seg{n}", f"Cor: {n} iguais → mesma", "cor", n, "seguir"))
+        for n in (4, 6):
+            linhas.extend([(f"cor_alt{n}", f"Cor: alternância {n} → continua", "cor", n, "alternar"),
+                           (f"cor_quebra{n}", f"Cor: alternância {n} → quebra", "cor", n, "quebrar")])
+        for familia, nome in (("duzia", "Dúzia"), ("coluna", "Coluna")):
+            for n in (3, 4):
+                linhas.append((f"{familia}_cob{n}", f"{nome}: {n} iguais → outras duas", familia, n, "cobrir"))
+            linhas.append((f"{familia}_seg3", f"{nome}: 3 iguais → mesma", familia, 3, "seguir"))
+        for familia, nome in (("paridade", "Par/ímpar"), ("metade", "1–18/19–36")):
+            for modo, texto in (("inverter", "inverte"), ("seguir", "repete")):
+                linhas.append((f"{familia}_{modo}4", f"{nome}: 4 iguais → {texto}", familia, 4, modo))
+    else:
+        for n in (3, 4, 5):
+            linhas.append((f"bb_inv{n}", f"{n} iguais → lado oposto", "bacbo", n, "inverter"))
+        for n in (2, 3, 4, 5):
+            linhas.append((f"bb_seg{n}", f"{n} iguais → mesmo lado", "bacbo", n, "seguir"))
+        for n in (4, 6):
+            linhas.extend([(f"bb_alt{n}", f"Alternância {n} → continua", "bacbo", n, "alternar"),
+                           (f"bb_quebra{n}", f"Alternância {n} → quebra", "bacbo", n, "quebrar")])
+        linhas.extend([("bb_duplas", "Duplas PPBB/BBPP → primeiro lado", "bacbo", 4, "duplas"),
+                       ("bb_triplas", "Triplas PPPBBB/BBBPPP → primeiro lado", "bacbo", 6, "triplas"),
+                       ("bb_emp", "Empate → novo empate", "bacbo", 1, "pos_empate"),
+                       ("bb_retomar", "Após empate → retoma lado anterior", "bacbo", 2, "retomar")])
+    return [PadraoPesquisa(c, jogo, nome, f, g, m) for c, nome, f, g, m in linhas]
+
+
+def liquidar_pesquisa(evento, alvo: AlvoPesquisa, config: ConfigPesquisa) -> tuple:
+    """(acerto do alvo principal, lucro líquido ou None, exposição total)."""
+    ficha, protecao = config.valor_por_alvo, config.protecao
+    if alvo.familia != "bacbo":
+        acertou = _valor_familia(evento, alvo.familia) in alvo.alvos
+        multiplicador = 3 if alvo.familia in ("duzia", "coluna") else 2
+        apostado = ficha * len(alvo.alvos) + protecao
+        retorno = ficha * multiplicador if acertou else 0.0
+        if evento.numero == 0:
+            retorno += 36 * protecao
+        return acertou, retorno - apostado, apostado
+    lado = alvo.alvos[0]
+    acertou = evento.resultado == lado
+    if lado == EMPATE:
+        if acertou and evento.soma_vencedora is None:
+            return True, None, ficha
+        retorno = ficha * (PAGA_EMPATE[evento.soma_vencedora] + 1) if acertou else 0.0
+        return acertou, retorno - ficha, ficha
+    apostado = ficha + protecao
+    if evento.resultado == EMPATE:
+        if protecao > 0 and evento.soma_vencedora is None:
+            return False, None, apostado
+        retorno = ficha * DEVOLUCAO_NO_EMPATE
+        if protecao:
+            retorno += protecao * (PAGA_EMPATE[evento.soma_vencedora] + 1)
+    else:
+        retorno = 2 * ficha if acertou else 0.0
+    return acertou, retorno - apostado, apostado
+
+
+@lru_cache(maxsize=128)
+def matematica_pesquisa(alvo: AlvoPesquisa, config: ConfigPesquisa) -> dict:
+    """Enumeração EXATA das 37 casas ou das 6^4 combinações de dados."""
+    if alvo.familia == "bacbo":
+        eventos = [RodadaBacBo.dos_dados(*d) for d in product(range(1, 7), repeat=4)]
+    else:
+        eventos = [Giro.a_partir_do_numero(n) for n in range(37)]
+    liquidacoes = [liquidar_pesquisa(e, alvo, config) for e in eventos]
+    retornos = [lucro / aposta for _, lucro, aposta in liquidacoes]
+    return {"chance_alvo": sum(int(a) for a, _, _ in liquidacoes) / len(eventos),
+            "chance_lucro": sum(int(l > 0) for _, l, _ in liquidacoes) / len(eventos),
+            "roi_teorico": math.fsum(retornos) / len(eventos),
+            "retorno_minimo": min(retornos), "retorno_maximo": max(retornos)}
+
+
+def intervalo_wilson(acertos: int, total: int, alpha: float = 0.05) -> tuple:
+    """Intervalo aproximado de Wilson, sob hipótese de observações independentes."""
+    if not 0 <= acertos <= total or not 0 < alpha < 1:
+        raise ValueError("Contagens ou alpha inválidos para o intervalo.")
+    if total == 0:
+        return 0.0, 1.0
+    z = NormalDist().inv_cdf(1 - alpha / 2)
+    p, z2 = acertos / total, z*z
+    centro = (p + z2/(2*total)) / (1 + z2/total)
+    raio = z * math.sqrt(p*(1-p)/total + z2/(4*total*total)) / (1 + z2/total)
+    return max(0.0, centro-raio), min(1.0, centro+raio)
+
+
+class MetricasPesquisa:
+    def __init__(self) -> None:
+        self.entradas = self.acertos = self.positivos = self.incompletas = 0
+        self.apostado = self.lucro = self.pico = self.queda_maxima = 0.0
+        self.sequencia_perdas = self.maior_sequencia_perdas = 0
+
+    def registrar(self, acertou: bool, lucro: Optional[float], apostado: float) -> None:
+        self.entradas += 1
+        self.acertos += int(acertou)
+        self.apostado += apostado
+        if lucro is None:
+            self.incompletas += 1
+            self.sequencia_perdas = 0
+            return
+        self.lucro += lucro
+        self.positivos += int(lucro > 0)
+        self.pico = max(self.pico, self.lucro)
+        self.queda_maxima = max(self.queda_maxima, self.pico - self.lucro)
+        self.sequencia_perdas = self.sequencia_perdas + 1 if lucro < 0 else 0
+        self.maior_sequencia_perdas = max(self.maior_sequencia_perdas, self.sequencia_perdas)
+
+    def resumo(self, matematica: dict, alpha_corrigido: float) -> dict:
+        n = self.entradas
+        exato = self.incompletas == 0
+        roi = self.lucro / self.apostado if self.apostado and exato else None
+        penalidade = ((matematica["retorno_maximo"] - matematica["retorno_minimo"])
+                      * math.sqrt(math.log(1/alpha_corrigido) / (2*n))) if n else None
+        return {"entradas": n, "acertos_alvo": self.acertos,
+                "acerto": self.acertos/n if n else None,
+                "acerto_limite_conservador": max(0.0, self.acertos/n - math.sqrt(math.log(1/alpha_corrigido)/(2*n))) if n else 0.0,
+                "wilson_95": list(intervalo_wilson(self.acertos, n)),
+                "wilson_corrigido": list(intervalo_wilson(self.acertos, n, alpha_corrigido)),
+                "entradas_com_lucro": self.positivos if exato else None,
+                "liquidacoes_incompletas": self.incompletas,
+                "apostado": round(self.apostado, 6), "lucro": round(self.lucro, 6) if exato else None,
+                "lucro_parcial_conhecido": round(self.lucro, 6), "roi": roi,
+                "roi_limite_inferior": roi - penalidade if roi is not None and n else None,
+                "queda_maxima": round(self.queda_maxima, 6) if exato else None,
+                "maior_sequencia_perdas": self.maior_sequencia_perdas if exato else None}
+
+
+def _horario_csv(texto: str) -> Optional[datetime]:
+    texto = texto.strip()
+    if not texto:
+        return None
+    try:
+        valor = datetime.fromisoformat(texto.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            valor = datetime.strptime(texto, "%d/%m/%Y %H:%M:%S")
+        except ValueError as erro:
+            raise ValueError("Use horário ISO 8601 ou DD/MM/AAAA HH:MM:SS.") from erro
+    return valor if valor.tzinfo is not None else valor.replace(tzinfo=timezone(timedelta(hours=-3)))
+
+
+def importar_historico_pesquisa(dados: bytes, jogo: str) -> tuple:
+    """CSV completo, do mais antigo para o mais novo. Nunca elimina resultados iguais."""
+    if jogo not in ("roleta", "bacbo"):
+        raise ValueError("Jogo inválido.")
+    if len(dados) > 30 * 1024 * 1024:
+        raise ValueError("O CSV excede o limite de 30 MB.")
+    try:
+        texto = dados.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        texto = dados.decode("cp1252")
+    if not texto.strip():
+        raise ValueError("Arquivo vazio.")
+    primeira = texto.splitlines()[0]
+    separador = max((";", ",", "\t"), key=primeira.count)
+    leitor = csv.DictReader(io.StringIO(texto), delimiter=separador)
+    campos = leitor.fieldnames or []
+    if len(campos) != len(set(campos)):
+        raise ValueError("O CSV contém colunas repetidas.")
+    if any(c in campos for c in ("Padrão", "Apostado (R$)", "Entrada em")):
+        raise ValueError("Este é um relatório de entradas. Use o histórico completo de TODAS as rodadas.")
+    necessarios = {"numero"} if jogo == "roleta" else {"resultado"}
+    if not necessarios.issubset(campos):
+        raise ValueError("Coluna obrigatória: " + ", ".join(sorted(necessarios)))
+    registros, vistos, duplicatas = [], {}, 0
+    for linha, row in enumerate(leitor, 2):
+        if None in row or any(v is None for v in row.values()):
+            raise ValueError(f"Linha {linha}: quantidade de colunas inválida.")
+        try:
+            horario = _horario_csv(row.get("horario", ""))
+            mesa = row.get("mesa", "").strip() or "mesa_informada"
+            identificador = row.get("id_rodada", "").strip() or f"linha-{linha}"
+            origem = row.get("origem", "informado").strip() or "informado"
+            if jogo == "roleta":
+                evento = Giro.a_partir_do_numero(int(row["numero"].strip()), horario)
+            else:
+                lado = row["resultado"].strip().upper()
+                lado = {"PLAYER": PLAYER, "BANKER": BANKER, "EMPATE": EMPATE, "T": EMPATE, "TIE": EMPATE}.get(lado, lado)
+                soma = int(row["soma"].strip()) if row.get("soma", "").strip() else None
+                if lado != EMPATE and soma == 2:
+                    raise ValueError("soma vencedora 2 só é possível em empate")
+                evento = RodadaBacBo.do_resultado(lado, soma, horario)
+            registro = RegistroPesquisa(identificador, mesa, evento, horario, origem)
+            chave = (mesa, identificador)
+            assinatura = ((evento.numero,) if jogo == "roleta" else
+                          (evento.resultado, evento.soma_vencedora)) + (horario, origem)
+            if chave in vistos:
+                if vistos[chave] != assinatura:
+                    raise ValueError("mesmo ID de rodada com dados conflitantes")
+                duplicatas += 1
+                continue
+            vistos[chave] = assinatura
+            registros.append(registro)
+            if len(registros) > LIMITE_REGISTROS_PESQUISA:
+                raise ValueError(f"limite de {LIMITE_REGISTROS_PESQUISA} rodadas excedido")
+        except (ValueError, TypeError) as erro:
+            raise ValueError(f"Linha {linha}: {erro}") from erro
+    validar_registros_pesquisa(registros, jogo)
+    avisos = [f"{duplicatas} linha(s) duplicada(s) removida(s) pelo ID da rodada."] if duplicatas else []
+    if any(r.horario is None for r in registros):
+        avisos.append("Sem horários: a ordem das linhas foi assumida como cronológica.")
+    if any(r.identificador.startswith("linha-") for r in registros):
+        avisos.append("Sem IDs completos: não é possível confirmar duplicatas entre rodadas.")
+    if any(r.mesa == "mesa_informada" for r in registros):
+        avisos.append("Mesa não identificada: não é possível comprovar que todas as linhas pertencem à mesma mesa.")
+    return registros, avisos
+
+
+def validar_registros_pesquisa(registros: list, jogo: str) -> None:
+    if jogo not in ("roleta", "bacbo"):
+        raise ValueError("Jogo inválido.")
+    if not registros:
+        raise ValueError("Não há rodadas válidas.")
+    if len(registros) > LIMITE_REGISTROS_PESQUISA:
+        raise ValueError("Histórico acima do limite de 200.000 rodadas.")
+    if len({r.mesa for r in registros}) != 1:
+        raise ValueError("Mesas diferentes no mesmo teste. Separe uma mesa por arquivo.")
+    # O Streamlit redefine as classes em cada rerun. Validar pelos dados mantém
+    # compatibilidade com instâncias legítimas guardadas pela execução anterior.
+    for registro in registros:
+        evento = registro.evento
+        try:
+            if jogo == "roleta":
+                esperado = Giro.a_partir_do_numero(evento.numero)
+                if (evento.cor, evento.duzia, evento.coluna) != (esperado.cor, esperado.duzia, esperado.coluna):
+                    raise ValueError("classificação da roleta inconsistente")
+            else:
+                RodadaBacBo.do_resultado(evento.resultado, evento.soma_vencedora)
+                sp, sb = evento.soma_player, evento.soma_banker
+                for soma in (sp, sb):
+                    if soma is not None and (isinstance(soma, bool) or not isinstance(soma, int) or not 2 <= soma <= 12):
+                        raise ValueError("soma dos dados inválida")
+                if sp is not None and sb is not None:
+                    esperado = PLAYER if sp > sb else (BANKER if sb > sp else EMPATE)
+                    if evento.resultado != esperado:
+                        raise ValueError("resultado e somas conflitantes")
+        except (AttributeError, ValueError, TypeError) as erro:
+            raise ValueError(f"Rodada incompatível com o jogo selecionado: {erro}") from erro
+    horarios = [r.horario for r in registros]
+    if any(h is None for h in horarios) and any(h is not None for h in horarios):
+        raise ValueError("Preencha todos os horários ou deixe todos em branco.")
+    horarios = [h if h is None or h.tzinfo else h.replace(tzinfo=timezone(timedelta(hours=-3))) for h in horarios]
+    if horarios[0] is not None and any(b < a for a, b in zip(horarios, horarios[1:])):
+        raise ValueError("Histórico fora de ordem: envie do mais antigo para o mais novo.")
+    chaves = [(r.mesa, r.identificador) for r in registros]
+    if len(set(chaves)) != len(chaves):
+        raise ValueError("IDs de rodada duplicados no histórico.")
+
+
+def csv_historico_pesquisa(registros: list, jogo: str) -> bytes:
+    cabecalho = ["id_rodada", "mesa", "horario", "origem"]
+    cabecalho += ["numero"] if jogo == "roleta" else ["resultado", "soma"]
+    linhas = [cabecalho]
+    for r in registros:
+        base = [r.identificador, r.mesa, r.horario.isoformat() if r.horario else "", r.origem]
+        base += [str(r.evento.numero)] if jogo == "roleta" else [r.evento.resultado, str(r.evento.soma_vencedora or "")]
+        linhas.append(base)
+    return _planilha(linhas)
+
+
+def simular_pesquisa(quantidade: int, semente: int, jogo: str) -> list:
+    if jogo not in ("roleta", "bacbo"):
+        raise ValueError("Jogo inválido.")
+    if isinstance(quantidade, bool) or not isinstance(quantidade, int) or not 200 <= quantidade <= LIMITE_REGISTROS_PESQUISA:
+        raise ValueError("Simule entre 200 e 200.000 rodadas.")
+    rng, registros = random.Random(semente), []
+    for n in range(quantidade):
+        evento = (Giro.a_partir_do_numero(rng.randint(0, 36)) if jogo == "roleta" else
+                  RodadaBacBo.dos_dados(*(rng.randint(1, 6) for _ in range(4))))
+        registros.append(RegistroPesquisa(str(n+1), f"SIMULADA-{jogo}-{semente}", evento, None, "simulado"))
+    return registros
+
+
+def analisar_pesquisa(registros: list, jogo: str, config: Optional[ConfigPesquisa] = None,
+                     padroes: Optional[list] = None, fonte: str = "historico_informado", ao_progredir=None) -> dict:
+    """50% treino; 25% validação; 25% teste. Seleção congelada ao fim do treino.
+
+    O teste completo é descritivo. Repetir testes/ajustar o catálogo exige um NOVO
+    histórico futuro. Wilson/limite de Hoeffding assumem rodadas independentes.
+    """
+    config = config or ConfigPesquisa()
+    validar_registros_pesquisa(registros, jogo)
+    if len(registros) < 200:
+        raise ValueError("São necessárias pelo menos 200 rodadas completas, em ordem cronológica.")
+    padroes = list(catalogo_pesquisa(jogo) if padroes is None else padroes)
+    if not padroes or len({p.chave for p in padroes}) != len(padroes) or any(p.jogo != jogo for p in padroes):
+        raise ValueError("O catálogo precisa ter padrões únicos do jogo selecionado.")
+    n, fim_treino, fim_validacao = len(registros), len(registros)//2, len(registros)*3//4
+    # Inclui todos os possíveis tamanhos de amostra até o horizonte do arquivo.
+    # Isso evita tratar a quantidade aleatória de gatilhos como um n fixado antes.
+    alpha_corrigido = config.alpha / (len(padroes) * 3 * 2 * len(registros))
+    metricas = {p.chave: [MetricasPesquisa(), MetricasPesquisa(), MetricasPesquisa()] for p in padroes}
+    historico, pendentes, matematicas = deque(maxlen=40), {}, {}
+    selecionado, curva_teste, lucro_teste = None, [(0, 0.0)], 0.0
+    teste_completo = True
+
+    def selecionar_no_treino():
+        elegiveis = []
+        for p in padroes:
+            if p.chave not in matematicas:
+                continue
+            s = metricas[p.chave][0].resumo(matematicas[p.chave], alpha_corrigido)
+            if s["entradas"] >= max(30, config.minimo_sinais//2) and s["roi_limite_inferior"] is not None:
+                elegiveis.append((s["roi_limite_inferior"], s["entradas"], p.chave))
+        return max(elegiveis)[2] if elegiveis else None
+
+    for i, registro in enumerate(registros):
+        if i == fim_treino:
+            selecionado = selecionar_no_treino()
+        fase = 0 if i < fim_treino else (1 if i < fim_validacao else 2)
+        for chave, alvo in pendentes.items():
+            acerto, lucro, aposta = liquidar_pesquisa(registro.evento, alvo, config)
+            metricas[chave][fase].registrar(acerto, lucro, aposta)
+            if fase == 2 and chave == selecionado:
+                if lucro is None:
+                    teste_completo = False
+                elif teste_completo:
+                    lucro_teste += lucro
+                    curva_teste.append((i - fim_validacao + 1, lucro_teste))
+        historico.append(registro.evento)
+        pendentes = {}
+        for p in padroes:
+            alvo = p.prever(list(historico))
+            if alvo is not None:
+                pendentes[p.chave] = alvo
+                if p.chave not in matematicas:
+                    matematicas[p.chave] = matematica_pesquisa(alvo, config)
+        if ao_progredir and (i % max(1, n//100) == 0 or i == n-1):
+            ao_progredir((i+1)/n)
+    linhas = []
+    for p in padroes:
+        # A distribuição não depende do alvo específico, por simetria da mesa.
+        if p.chave not in matematicas:
+            exemplo = (AlvoPesquisa("bacbo", (EMPATE if p.modo == "pos_empate" else PLAYER,))
+                       if jogo == "bacbo" else AlvoPesquisa(p.familia,
+                           (1, 2) if p.modo == "cobrir" else ((VERMELHO,) if p.familia == "cor" else
+                              ((1,) if p.familia in ("duzia", "coluna") else (0,)))))
+            matematicas[p.chave] = matematica_pesquisa(exemplo, config)
+        mat = matematicas[p.chave]
+        resumos = [m.resumo(mat, alpha_corrigido) for m in metricas[p.chave]]
+        motivos = []
+        for nome, resumo in zip(("validação", "teste"), resumos[1:]):
+            if resumo["entradas"] < config.minimo_sinais:
+                motivos.append(f"{nome}: amostra insuficiente")
+            if resumo["liquidacoes_incompletas"]:
+                motivos.append(f"{nome}: pagamento de empate incompleto")
+            if resumo["wilson_corrigido"][0] <= max(config.meta_acerto, mat["chance_alvo"]):
+                motivos.append(f"{nome}: limite de acerto não supera meta e referência teórica")
+            if resumo["acerto_limite_conservador"] <= max(config.meta_acerto, mat["chance_alvo"]):
+                motivos.append(f"{nome}: limite conservador de acerto insuficiente")
+            if resumo["roi_limite_inferior"] is None or resumo["roi_limite_inferior"] <= 0:
+                motivos.append(f"{nome}: retorno positivo sem evidência suficiente")
+        linhas.append({"chave": p.chave, "nome": p.nome, "matematica": mat,
+                       "treino": resumos[0], "validacao": resumos[1], "teste": resumos[2],
+                       "criterios_numericos": not motivos, "motivos": motivos})
+    escolhido = next((r for r in linhas if r["chave"] == selecionado), None)
+    dados_simulados = fonte == "simulado" or any(r.origem == "simulado" for r in registros)
+    origem_desconhecida = any(r.origem in ("nao_informada", "desconhecida") for r in registros)
+    metadados_completos = all(r.horario is not None and not r.identificador.startswith("linha-")
+                             and r.mesa != "mesa_informada" for r in registros)
+    evidencia = bool(escolhido and escolhido["criterios_numericos"] and not dados_simulados
+                     and not origem_desconhecida and metadados_completos)
+    assinatura = hashlib.sha256(csv_historico_pesquisa(registros, jogo)).hexdigest()
+    return {"versao": VERSAO_ANALISE, "jogo": jogo, "fonte": fonte, "dados_simulados": dados_simulados,
+            "origem_desconhecida": origem_desconhecida, "mesa": registros[0].mesa,
+            "metadados_completos": metadados_completos,
+            "rodadas": n, "sha256_historico": assinatura, "config": asdict(config),
+            "divisao": {"treino": [0, fim_treino], "validacao": [fim_treino, fim_validacao], "teste": [fim_validacao, n]},
+            "alpha_por_comparacao": alpha_corrigido, "selecionado_no_treino": selecionado,
+            "criterios_atendidos_no_historico": evidencia, "tabela": linhas,
+            "curva_teste": curva_teste if teste_completo else [],
+            "limites": ["Não há garantia de acerto futuro ou lucro.",
+                        "Os padrões são hipóteses experimentais, não métodos comprovados pelas fontes.",
+                        "Intervalos assumem rodadas independentes; Wilson é uma aproximação.",
+                        "Correção cobre apenas este catálogo e esta execução; não cobre repetição de testes.",
+                        "O retorno de cada padrão é contrafactual, com ficha fixa e sem limites de banca.",
+                        "O acompanhamento separado aplica limites de banca, exposição e parada.",
+                        "Os horários/IDs importados e a origem declarada não são autenticados pelo programa."],
+            "fontes": FONTES_PESQUISA}
+
+
+def motivo_risco_pesquisa(saldo: float, aposta: float, config: ConfigPesquisa) -> Optional[str]:
+    if saldo <= config.banca_inicial * (1-config.stop_loss):
+        return "Limite de perda atingido."
+    if saldo >= config.banca_inicial * (1+config.stop_gain):
+        return "Limite de ganho atingido."
+    if aposta > saldo:
+        return "Saldo insuficiente para a exposição total."
+    if aposta > saldo * config.exposicao_maxima + 1e-9:
+        return "Exposição acima do limite por rodada."
+    return None
+
+
+class AcompanhamentoPesquisa:
+    """Uma hipótese congelada, uma entrada por rodada, APENAS EM OBSERVAÇÃO."""
+    def __init__(self, padrao: PadraoPesquisa, config: ConfigPesquisa, historico: Optional[list] = None) -> None:
+        self.padrao, self.config = padrao, config
+        self.historico = deque(historico or [], maxlen=40)
+        self.metricas = MetricasPesquisa()
+        self.saldo = config.banca_inicial
+        self.pendente = None
+        self.motivo = "Aguardando gatilho."
+        self.liquidacao_incompleta = False
+        self._preparar()
+
+    def _preparar(self) -> None:
+        self.pendente = None
+        if self.liquidacao_incompleta:
+            self.motivo = "Observação pausada: empate sem soma; saldo final desconhecido."
+            return
+        alvo = self.padrao.prever(list(self.historico))
+        if alvo is None:
+            self.motivo = "Aguardando gatilho."
+            return
+        aposta = (self.config.valor_por_alvo if alvo.familia == "bacbo" and alvo.alvos == (EMPATE,) else
+                  self.config.valor_por_alvo * len(alvo.alvos) + self.config.protecao)
+        bloqueio = motivo_risco_pesquisa(self.saldo, aposta, self.config)
+        self.motivo = bloqueio or "Gatilho em observação para a próxima rodada."
+        if bloqueio is None:
+            self.pendente = alvo
+
+    def observar(self, evento) -> None:
+        if self.pendente is not None:
+            acerto, lucro, aposta = liquidar_pesquisa(evento, self.pendente, self.config)
+            self.metricas.registrar(acerto, lucro, aposta)
+            if lucro is None:
+                self.liquidacao_incompleta = True
+            else:
+                self.saldo += lucro
+        self.historico.append(evento)
+        self._preparar()
+
+
+def registrar_rodada_pesquisa(motor, evento, indice: int) -> None:
+    if not motor.registrar:
+        return  # backtests de aceitação não pagam custo de registro/pesquisa
+    if len(motor.registros_pesquisa) >= LIMITE_REGISTROS_PESQUISA:
+        motor.descartados_pesquisa += 1
+    # ID/horário locais de captura, não IDs autenticados da mesa.
+    horario = datetime.now(timezone(timedelta(hours=-3)))
+    motor.registros_pesquisa.append(RegistroPesquisa(str(indice), motor.mesa_pesquisa, evento, horario,
+                                                    motor.fonte_pesquisa))
+    if motor.acompanhamento_pesquisa is not None:
+        motor.acompanhamento_pesquisa.observar(evento)
+
+
+def iniciar_registro_pesquisa(motor, jogo: str) -> None:
+    motor.registros_pesquisa = deque(maxlen=LIMITE_REGISTROS_PESQUISA)
+    motor.descartados_pesquisa = 0
+    motor.mesa_pesquisa = f"sessao-{jogo}-{time.time_ns()}"
+    motor.fonte_pesquisa = "nao_informada"
+    motor.acompanhamento_pesquisa = None
+
+
+def sincronizar_historico_pesquisa(motor) -> None:
+    """Calibração não liquida uma entrada e invalida o desfazer de antes dela."""
+    motor._foto = None
+    motor._foto_pesquisa = None
+    acompanhamento = getattr(motor, "acompanhamento_pesquisa", None)
+    if acompanhamento is not None:
+        acompanhamento.historico = deque(motor.historico, maxlen=40)
+        acompanhamento._preparar()
+
+
+def texto_alvo_pesquisa(alvo: AlvoPesquisa) -> str:
+    if alvo.familia == "bacbo":
+        return NOMES_LADO[alvo.alvos[0]]
+    if alvo.familia == "cor":
+        return str(alvo.alvos[0])
+    if alvo.familia == "paridade":
+        return "PAR" if alvo.alvos[0] == 0 else "ÍMPAR"
+    if alvo.familia == "metade":
+        return "1 a 18" if alvo.alvos[0] == 0 else "19 a 36"
+    return ("Dúzia " if alvo.familia == "duzia" else "Coluna ") + " + ".join(str(a) for a in alvo.alvos)
+
+
+def _resumo_monitor_pesquisa(st, motor, jogo: str) -> None:
+    with st.expander("Análise avançada · padrões e qualidade da evidência", expanded=True):
+        st.caption("Os alertas dos padrões originais são experimentais. Acerto histórico não é probabilidade da próxima rodada.")
+        if jogo == "bacbo" and getattr(motor.banca, "liquidacoes_estimadas", 0):
+            st.warning(f"O comparativo original tem {motor.banca.liquidacoes_estimadas} empate(s) sem soma: "
+                       "usa o pagamento mínimo e seu saldo é uma estimativa. A pesquisa trata esses pagamentos como incompletos.")
+        acompanhamento = motor.acompanhamento_pesquisa
+        if acompanhamento is None:
+            st.info("Abra Pesquisa e validação na barra lateral para testar novos padrões e acompanhar um candidato.")
+        else:
+            st.write(f"Em observação: **{acompanhamento.padrao.nome}**")
+            st.caption(acompanhamento.motivo)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Entradas observadas", acompanhamento.metricas.entradas)
+            n = acompanhamento.metricas.entradas
+            c2.metric("Acerto do alvo", formatar_pct(acompanhamento.metricas.acertos/n) if n else "—")
+            c3.metric("Saldo da observação", "Incompleto" if acompanhamento.liquidacao_incompleta else
+                      formatar_reais(acompanhamento.saldo))
+            if acompanhamento.pendente is not None:
+                st.write("Próximo alvo em observação: **" + texto_alvo_pesquisa(acompanhamento.pendente) + "**")
+        st.caption(f"Histórico completo registrado: {len(motor.registros_pesquisa):,} rodadas. "
+                   "O relatório de entradas antigo continua separado.")
+
+
+def _painel_pesquisa(st, sessao, jogo: str) -> None:
+    motor = sessao.motor
+    prefixo = "pesq_" + jogo
+    st.markdown('<div class="rr-topo"><div><div class="rr-sub">Roleta e Bac Bo · v2.0</div>'
+                '<div class="rr-titulo">Pesquisa e validação</div></div></div>', unsafe_allow_html=True)
+    st.write("Teste hipóteses com todas as rodadas, selecione no primeiro período e confira o resultado em dois períodos posteriores.")
+    st.info("Meta de acerto superior a 60%, com retorno líquido positivo e amostra suficiente. "
+            "Isso é um critério de avaliação do histórico, sem garantia de desempenho futuro.")
+
+    def captura():
+        sessao.tick()
+        st.caption(f"Rodadas capturadas nesta sessão: {len(motor.registros_pesquisa):,}")
+    st.fragment(captura, run_every=1.0 if sessao.leitor_ativo() or sessao.sim["rodando"] else None)()
+    if motor.descartados_pesquisa:
+        st.warning(f"O limite de captura foi atingido: {motor.descartados_pesquisa} rodadas antigas saíram do registro.")
+    fonte = st.radio("Dados para análise", ["Importar histórico CSV", "Sessão atual", "Simulação de controle"],
+                     key=prefixo+"_fonte", horizontal=True)
+    arquivo = None
+    if fonte == "Importar histórico CSV":
+        st.caption("Uma linha por rodada, da mais antiga para a mais nova; uma única mesa. "
+                   "O CSV antigo de entradas não serve como histórico completo.")
+        arquivo = st.file_uploader("Histórico de todas as rodadas (CSV)", type=["csv"], key=prefixo+"_csv")
+        modelo = ("id_rodada;mesa;horario;numero\n1;minha_mesa;2026-11-02T15:00:00-03:00;7\n" if jogo == "roleta" else
+                  "id_rodada;mesa;horario;resultado;soma\n1;minha_mesa;2026-11-02T15:00:00-03:00;E;7\n")
+        st.download_button("Baixar modelo CSV", modelo.encode("utf-8-sig"), file_name=f"modelo_{jogo}.csv",
+                           mime="text/csv", key=prefixo+"_modelo")
+    elif fonte == "Sessão atual":
+        st.caption("Inclui apenas as rodadas novas observadas desde a abertura desta sessão; "
+                   "a faixa inicial de resultados da mesa não é contada retroativamente.")
+    else:
+        st.caption("Dados gerados por sorteio: servem para testar o software; não comprovam vantagem numa mesa real.")
+    c1, c2 = st.columns(2)
+    n_sim = c1.number_input("Rodadas no controle simulado", min_value=200, max_value=200_000,
+                            value=20_000, step=1000, key=prefixo+"_n")
+    semente = c2.number_input("Semente do controle", min_value=0, max_value=1_000_000_000,
+                              value=42, key=prefixo+"_semente")
+    with st.expander("Ficha fixa, amostra e limites da observação"):
+        a, b, c = st.columns(3)
+        ficha = a.number_input("Ficha por alvo (R$)", min_value=0.01, value=10.0, key=prefixo+"_ficha")
+        protecao = b.number_input("Proteção no zero (R$)" if jogo == "roleta" else "Proteção no empate (R$)",
+                                  min_value=0.0, value=0.0, key=prefixo+"_protecao")
+        minimo = c.number_input("Mínimo de sinais em cada período", min_value=30, max_value=20_000,
+                                value=200, step=50, key=prefixo+"_min")
+        a, b, c, d = st.columns(4)
+        banca = a.number_input("Banca da observação (R$)", min_value=1.0, value=1000.0, key=prefixo+"_banca")
+        exposicao = b.number_input("Exposição máxima (%)", min_value=0.1, max_value=100.0,
+                                    value=2.0, key=prefixo+"_exposicao")
+        stop_loss = c.number_input("Limite de perda (%)", min_value=0.1, max_value=100.0,
+                                    value=10.0, key=prefixo+"_stop_loss")
+        stop_gain = d.number_input("Limite de ganho (%)", min_value=0.1, max_value=100.0,
+                                    value=10.0, key=prefixo+"_stop_gain")
+        st.caption("Uma entrada por rodada no acompanhamento, sem progressão de ficha. "
+                   "A comparação dos padrões usa ficha fixa e não aplica paradas de banca.")
+    config = ConfigPesquisa(float(ficha), float(protecao), float(banca), int(minimo),
+                            exposicao_maxima=float(exposicao)/100,
+                            stop_loss=float(stop_loss)/100, stop_gain=float(stop_gain)/100)
+    if st.button("Analisar com treino, validação e teste", type="primary", key=prefixo+"_analisar"):
+        try:
+            avisos = []
+            if fonte == "Importar histórico CSV":
+                if arquivo is None:
+                    raise ValueError("Selecione o CSV completo da mesa.")
+                registros, avisos = importar_historico_pesquisa(arquivo.getvalue(), jogo)
+                rotulo_fonte = "historico_informado"
+            elif fonte == "Sessão atual":
+                with sessao.trava:
+                    registros = list(motor.registros_pesquisa)
+                rotulo_fonte = "sessao_capturada"
+            else:
+                registros = simular_pesquisa(int(n_sim), int(semente), jogo)
+                rotulo_fonte = "simulado"
+            barra = st.progress(0.0, text="Avaliando períodos cronológicos…")
+            relatorio = analisar_pesquisa(registros, jogo, config, fonte=rotulo_fonte,
+                                         ao_progredir=lambda f: barra.progress(f))
+            barra.empty()
+            st.session_state[prefixo+"_resultado"] = (relatorio, csv_historico_pesquisa(registros, jogo), avisos)
+        except ValueError as erro:
+            st.error(str(erro))
+    resultado = st.session_state.get(prefixo+"_resultado")
+    if resultado:
+        relatorio, csv_dados, avisos = resultado
+        for aviso in avisos:
+            st.warning(aviso)
+        st.caption(f"Resultado congelado para {relatorio['rodadas']:,} rodadas; "
+                   f"mesa: {relatorio['mesa']}. Alterar controles exige executar uma nova análise.")
+        if not relatorio["metadados_completos"]:
+            st.caption("Faltam IDs, horários ou identificação da mesa para completar a avaliação da origem dos dados.")
+        escolhido = next((r for r in relatorio["tabela"] if r["chave"] == relatorio["selecionado_no_treino"]), None)
+        if relatorio["criterios_atendidos_no_historico"]:
+            st.success("O candidato escolhido no treino atendeu aos critérios neste histórico informado. "
+                       "Confirme em dados futuros antes de interpretar como evidência nova.")
+        else:
+            st.warning("A meta ainda não foi demonstrada com retorno positivo e evidência suficiente em dados reais.")
+        if escolhido:
+            st.write("Candidato escolhido somente no treino: **" + escolhido["nome"] + "**")
+            a, b, c, d = st.columns(4)
+            s = escolhido["teste"]
+            a.metric("Sinais no teste final", s["entradas"])
+            b.metric("Acerto no teste", formatar_pct(s["acerto"]) if s["acerto"] is not None else "—")
+            c.metric("ROI no teste", formatar_pct(s["roi"]) if s["roi"] is not None else "Incompleto")
+            d.metric("Queda máxima no teste", formatar_reais(s["queda_maxima"]) if s["queda_maxima"] is not None else "Incompleta")
+            if escolhido["motivos"]:
+                st.caption("; ".join(escolhido["motivos"]))
+            if st.button("Acompanhar candidato em observação", key=prefixo+"_acompanhar"):
+                padrao = next(p for p in catalogo_pesquisa(jogo) if p.chave == escolhido["chave"])
+                with sessao.trava:
+                    motor.acompanhamento_pesquisa = AcompanhamentoPesquisa(
+                        padrao, ConfigPesquisa(**relatorio["config"]), list(motor.historico))
+                st.success("Acompanhamento iniciado a partir de agora. Volte ao Monitor para acompanhar; sem apostas automáticas.")
+        fase = st.radio("Período da tabela", ["teste", "validacao", "treino"],
+                         format_func=lambda x: {"teste": "Teste final (25%)", "validacao": "Validação (25%)", "treino": "Treino (50%)"}[x],
+                         key=prefixo+"_fase", horizontal=True)
+        tabela = []
+        for r in relatorio["tabela"]:
+            s = r[fase]
+            tabela.append({"Padrão": r["nome"], "Sinais": s["entradas"],
+                           "Acerto alvo": formatar_pct(s["acerto"]) if s["acerto"] is not None else "—",
+                           "IC 95%": " a ".join(formatar_pct(v) for v in s["wilson_95"]),
+                           "Limite inferior corrigido": formatar_pct(s["wilson_corrigido"][0]),
+                           "Acerto inferior conservador": formatar_pct(s["acerto_limite_conservador"]),
+                           "Referência teórica": formatar_pct(r["matematica"]["chance_alvo"]),
+                           "Lucro": formatar_reais(s["lucro"]) if s["lucro"] is not None else "Incompleto",
+                           "ROI": formatar_pct(s["roi"]) if s["roi"] is not None else "—",
+                           "ROI inferior conservador": formatar_pct(s["roi_limite_inferior"]) if s["roi_limite_inferior"] is not None else "—",
+                           "Empates sem pagamento": s["liquidacoes_incompletas"]})
+        st.dataframe(tabela, hide_index=True, use_container_width=True)
+        if relatorio["curva_teste"] and escolhido:
+            st.markdown(Html.grafico_curva([(i, lucro, 0.0) for i, lucro in relatorio["curva_teste"]],
+                                           "Resultado do candidato no teste final", "rodadas", "Referência zero"),
+                        unsafe_allow_html=True)
+        a, b = st.columns(2)
+        a.download_button("Baixar relatório completo JSON", json.dumps(relatorio, ensure_ascii=False, indent=2).encode("utf-8"),
+                           file_name=f"validacao_{jogo}.json", mime="application/json", key=prefixo+"_json")
+        b.download_button("Baixar histórico usado no teste", csv_dados,
+                           file_name=f"historico_{jogo}.csv", mime="text/csv", key=prefixo+"_hist_testado")
+    with sessao.trava:
+        registros_atuais = list(motor.registros_pesquisa)
+    st.download_button("Exportar todas as rodadas da sessão atual", csv_historico_pesquisa(registros_atuais, jogo),
+                       file_name=f"historico_completo_{jogo}.csv", mime="text/csv", key=prefixo+"_hist_sessao")
+    with st.expander("Como interpretar os resultados e fontes"):
+        st.write("Acerto conta somente o alvo principal; proteção, empate, gale e várias apostas não inflam essa taxa. "
+                 "Duas dúzias/colunas cobrem 24/37 casas (64,86%), mas precisam de 66,67% de acerto para empatar sem proteção. "
+                 "Cada lado do Bac Bo vence em 575/1296 combinações (44,37%).")
+        st.write("A seleção usa apenas o treino e permanece congelada. O teste final não escolhe o vencedor. "
+                 "Wilson e a correção de Bonferroni medem incerteza; o limite inferior conservador do ROI usa a faixa exata "
+                 "de pagamentos e a desigualdade de Hoeffding. Esses cálculos pressupõem rodadas independentes. "
+                 "Repetir a análise até aparecer um resultado bom invalida a interpretação de teste reservado.")
+        for nome, url in FONTES_PESQUISA.items():
+            st.markdown(f"[{nome}]({url})")
+
+
+def rodar_pesquisa_terminal(args) -> None:
+    config = ConfigPesquisa(valor_por_alvo=args.ficha_pesquisa, protecao=args.protecao_pesquisa,
+                            banca_inicial=args.banca_pesquisa, minimo_sinais=args.min_sinais_pesquisa)
+    if args.pesquisa and args.pesquisa_simulada is not None:
+        raise ValueError("Escolha --pesquisa ou --pesquisa-simulada.")
+    if args.pesquisa:
+        with open(args.pesquisa, "rb") as arquivo:
+            registros, avisos = importar_historico_pesquisa(arquivo.read(), args.jogo)
+        fonte = "historico_informado"
+    else:
+        registros, avisos = simular_pesquisa(args.pesquisa_simulada, args.semente if args.semente is not None else 42, args.jogo), []
+        fonte = "simulado"
+    relatorio = analisar_pesquisa(registros, args.jogo, config, fonte=fonte)
+    destino = args.relatorio_pesquisa or f"validacao_{args.jogo}.json"
+    with open(destino, "w", encoding="utf-8") as arquivo:
+        json.dump(relatorio, arquivo, ensure_ascii=False, indent=2)
+    for aviso in avisos:
+        exibir("Aviso: " + aviso)
+    exibir(f"Pesquisa {args.jogo}: {len(registros)} rodadas | relatório: {destino}")
+    exibir("Candidato escolhido no treino: " + str(relatorio["selecionado_no_treino"]))
+    exibir("Critérios atendidos neste histórico: " + ("SIM" if relatorio["criterios_atendidos_no_historico"] else "NÃO"))
+    exibir("Não há garantia de acerto ou lucro futuro. Simulação não comprova vantagem em mesa real.")
+
+
+def salvar_foto_pesquisa(motor) -> None:
+    primeiro = motor.registros_pesquisa[0] if len(motor.registros_pesquisa) == LIMITE_REGISTROS_PESQUISA else None
+    motor._foto_pesquisa = (primeiro, motor.descartados_pesquisa, copy.deepcopy(motor.acompanhamento_pesquisa))
+
+
+def desfazer_registro_pesquisa(motor) -> None:
+    foto = getattr(motor, "_foto_pesquisa", None)
+    if foto is not None:
+        primeiro, motor.descartados_pesquisa, motor.acompanhamento_pesquisa = foto
+        if motor.registrar and motor.registros_pesquisa:
+            motor.registros_pesquisa.pop()
+            if primeiro is not None:
+                motor.registros_pesquisa.appendleft(primeiro)
+        motor._foto_pesquisa = None
 
 
 if __name__ == "__main__":

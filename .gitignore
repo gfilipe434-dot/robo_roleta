@@ -7,3 +7,4 @@ __pycache__/
 painel_robo_config.json
 robo_roleta_anterior.py
 *.baixando.py
+validacao_*.json

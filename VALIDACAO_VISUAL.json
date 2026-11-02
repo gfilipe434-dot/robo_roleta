@@ -1,0 +1,94 @@
+{
+  "versao_visual": "2.1",
+  "data": "2026-11-02",
+  "codigo_sha256": "24b4f11fd7f4035abb5c7c9740a76d1622dd4e7016fa498fab2b4708183d251a",
+  "testes_existentes": "............................................................             [100%]\n60 passed in 8.85s",
+  "definicoes_fora_da_interface_preservadas": 135,
+  "constantes_globais_preservadas": 47,
+  "conferencia_estrutural": "AST de cada classe e função fora da interface idêntica à versão anterior.",
+  "navegador_de_verificacao": "Chromium Headless 141",
+  "telas": [
+    {
+      "width": 1440,
+      "scroll": 1440,
+      "pockets": 37,
+      "cupulas": 4,
+      "faces": 24,
+      "cards": [
+        {
+          "x": 380,
+          "y": 398.78125,
+          "w": 478,
+          "h": 472.765625
+        },
+        {
+          "x": 882,
+          "y": 398.78125,
+          "w": 478,
+          "h": 472.765625
+        }
+      ],
+      "animacao": "38s",
+      "nome": "desktop",
+      "erros": [],
+      "navegacao_roleta": "ok",
+      "navegacao_bacbo": "ok"
+    },
+    {
+      "width": 1024,
+      "scroll": 1024,
+      "pockets": 37,
+      "cupulas": 4,
+      "faces": 24,
+      "cards": [
+        {
+          "x": 380,
+          "y": 456.5625,
+          "w": 564,
+          "h": 448.765625
+        },
+        {
+          "x": 380,
+          "y": 977.328125,
+          "w": 564,
+          "h": 448.765625
+        }
+      ],
+      "animacao": "38s",
+      "nome": "tablet",
+      "erros": []
+    },
+    {
+      "width": 390,
+      "scroll": 390,
+      "pockets": 37,
+      "cupulas": 4,
+      "faces": 24,
+      "cards": [
+        {
+          "x": 16,
+          "y": 436.6875,
+          "w": 358,
+          "h": 477.78125
+        },
+        {
+          "x": 16,
+          "y": 986.46875,
+          "w": 358,
+          "h": 477.78125
+        }
+      ],
+      "animacao": "38s",
+      "nome": "celular",
+      "erros": [],
+      "sidebar_aberta": false,
+      "reduced_motion": "none"
+    }
+  ],
+  "observacoes": [
+    "Cenas ilustrativas geradas em CSS e SVG no próprio arquivo.",
+    "Sem imagens, fontes ou bibliotecas gráficas externas para as cenas.",
+    "Capturas de tela usadas somente para revisão interna.",
+    "Não foi acessada ou testada uma conta ou mesa de cassino real."
+  ]
+}
